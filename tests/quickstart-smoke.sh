@@ -1,0 +1,63 @@
+#!/bin/sh
+# Exercise exactly the two fresh-install files, with dummy local-only endpoints.
+set -eu
+image="${1:?test image required}"
+project="sync-quickstart-ci-${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT:-1}"
+fixture="$(mktemp -d)"
+compose() { (cd "$fixture" && docker compose -p "$project" "$@"); }
+cleanup() {
+  # Only the uniquely named disposable test project is removed, including its volume.
+  compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  rm -rf "$fixture"
+}
+trap cleanup EXIT
+cp compose.quickstart.yaml "$fixture/compose.yaml"
+python3 - "$fixture/.env" "$image" <<'PY'
+from pathlib import Path
+import sys
+value = Path('.env.quickstart.example').read_text()
+value = value.replace(next(line for line in value.splitlines() if line.startswith('SYNC_IMAGE=')), 'SYNC_IMAGE=' + sys.argv[2])
+value = value.replace('https://npm.internal.example.com', 'https://127.0.0.1:1')
+value = value.replace('https://dns.internal.example.com', 'https://127.0.0.1:1')
+value = value.replace("'REPLACE_WITH_NPM_ACCOUNT_PASSWORD'", "' literal-$# space and \\' quote '")
+value = value.replace("'REPLACE_WITH_ZONE_SCOPED_API_TOKEN'", "'dummy-$#token'")
+Path(sys.argv[1]).write_text(value)
+PY
+compose config --quiet
+compose config --format json | python3 -c '
+import json, sys
+s = json.load(sys.stdin)["services"]["npm-technitium-safe-sync"]
+assert "build" not in s and "secrets" not in s and "ports" not in s
+assert s["user"] == "10001:10001" and s["read_only"] is True
+assert s["volumes"][0]["type"] == "volume" and s["volumes"][0]["target"] == "/data"
+assert s["environment"]["DRY_RUN"] == "false"
+'
+if NPM_SECRET= compose config --quiet >/dev/null 2>&1; then
+  echo 'ERROR: quickstart accepted an empty password'; exit 1
+fi
+compose run --rm --no-deps npm-technitium-safe-sync --check
+# Starting needs no host mkdir/chown, source tree, extra files, or root container.
+# The fixture has loopback closed-port endpoints; API failure here is intentional.
+compose up -d
+container="$(compose ps -q npm-technitium-safe-sync)"
+[ "$(docker inspect --format '{{.State.Running}}' "$container")" = true ]
+compose stop
+compose run --rm --no-deps --entrypoint python npm-technitium-safe-sync -c '
+import os
+from pathlib import Path
+import sync
+assert os.getuid() == 10001 and not os.access("/app/sync.py", os.W_OK)
+assert os.environ["NPM_SECRET"] == " literal-$# space and '\'' quote "
+assert os.environ["TECHNITIUM_TOKEN"] == "dummy-$#token"
+assert not Path("/data/state.json").exists()
+state = {"version": 1, "owned": {"app.apps.example.com": "192.0.2.20"}, "stale_since": {}}
+sync.state_save(Path("/data/state.json"), state)
+'
+# Ordinary down and recreation must retain ownership, unlike down --volumes.
+compose down
+compose run --rm --no-deps --entrypoint python npm-technitium-safe-sync -c '
+from pathlib import Path
+import sync
+assert sync.state_load(Path("/data/state.json"))["owned"] == {"app.apps.example.com": "192.0.2.20"}
+'
+echo 'PASS: two-file startup, required credentials, literal secrets, nonroot volume initialization and persistent state'

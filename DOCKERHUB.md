@@ -4,6 +4,8 @@ Configured destination: `docker.io/drreilab/npm-technitium-safe-sync`.
 
 This is a publishing destination, not proof that an image exists. Check successful Actions publication and anonymous pull results before using an image. The existing GHCR release remains available independently of Docker Hub setup.
 
+For fresh production deployment using only Compose and `.env`, follow the [README quickstart](README.md#production-quickstart-two-files-then-up). It uses the verified public image with automatic persistent storage. Existing file-secret/bind-mount installations should keep their storage setup.
+
 ## One-time setup
 
 1. The namespace owner creates a **public** repository named `npm-technitium-safe-sync` under `drreilab` on Docker Hub. Confirm ownership and visibility; do not overwrite another repository.

@@ -1,6 +1,7 @@
 .env
 .env.*
 !.env.example
+!.env.quickstart.example
 data/
 secrets/
 __pycache__/

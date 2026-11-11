@@ -25,6 +25,7 @@ jobs:
           docker build -t sync:test .
           docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 256m -v "$PWD/tests:/tests:ro" --entrypoint python sync:test -m unittest discover -s /tests -v
           sh tests/container-smoke.sh sync:test
+          sh tests/quickstart-smoke.sh sync:test
       - name: Validate deployment configuration and image pin
         run: |
           cp .env.example .env

@@ -12,7 +12,7 @@ Tests include local HTTP fixtures and disposable real NPM **2.16.0** / Technitiu
 
 ## Safety contract
 
-- `DRY_RUN=true`, `ENABLE_DELETIONS=false`, `ALLOW_EMPTY_NPM=false` by default.
+- Runtime/file-secret defaults: `DRY_RUN=true`, `ENABLE_DELETIONS=false`, `ALLOW_EMPTY_NPM=false`. The fresh-install quickstart explicitly sets `DRY_RUN=false` and keeps deletion disabled.
 - Read and validate all NPM hosts and permitted zones before writing. Malformed, unavailable, oversized, or empty source responses abort the cycle. Booleans and zone configuration are validated strictly.
 - Never adopt an existing DNS name, even if it has the same IP or a managed comment. Ownership requires persisted state **and** the exact managed comment, one enabled A record, and the previous IP. A changed comment, disabled record, multiple records, or mixed types causes a conflict.
 - Before each mutation, read the DNS snapshot again and refuse the write if the target changed. Refuse names below NS delegations, DNAMEs or CNAMEs. Use dedicated zones without separately hosted child zones; separate child zones are not discoverable through the permitted parent-zone API.
@@ -22,9 +22,223 @@ Tests include local HTTP fixtures and disposable real NPM **2.16.0** / Technitiu
 
 **Limits:** Technitium provides no conditional-write/transaction contract for these endpoints. A change between the final read and write remains possible. Run exactly one synchronizer per zone, use one persistent local state volume, and coordinate manual edits. Multiple independent state volumes are not safe HA. A write followed by a crash before state persistence can leave an orphan; inspect it manually, as the service refuses automatic adoption. A failed cycle can contain earlier successful writes; it is not a transaction. Missing owned records are conflicts and are not silently recreated. DNSSEC-generated records can cause mixed-type conflicts; use a dedicated unsigned staging/production zone for this implementation. Large zones above the 4 MB API response limit fail closed.
 
-## Deploy the published image
+## Production quickstart: two files, then up
 
-Requirements: Linux Docker Engine, Docker Compose v2, amd64 or arm64, and connectivity from the container to the management endpoints. Existing NPM and Technitium containers do not need restarting. `compose.yaml` pulls an image and contains no build instruction.
+For a **fresh installation**, you need only `compose.yaml` and `.env`. The preset
+pulls the verified public **1.0.2** image by digest, creates persistent storage
+with the correct nonroot ownership, and starts polling automatically. No source
+checkout, local build, secret files, host data directory or manual `chown` is
+required. Existing installations should use the upgrade instructions below and
+preserve their existing state mount.
+
+### 1. Prepare the existing apps
+
+- Ubuntu/Linux with Docker Engine and **Docker Compose v2**, on amd64 or arm64.
+  If needed, follow [Docker's Ubuntu installation instructions](https://docs.docker.com/engine/install/ubuntu/), including the Compose plugin.
+- Back up Technitium, then create an enabled **Primary** zone such as
+  `apps.example.com`. This application does not create zones or accounts.
+- Create a dedicated NPM account with **view access to all intended proxy hosts**.
+  Use that account's password, not a registry token. Incomplete visibility can
+  make valid hosts appear absent; keep deletion off initially.
+- Create a Technitium account/API token with **View + Modify** on that zone only.
+  Zone Delete permission is unnecessary while deletions are disabled.
+- The container must reach both management URLs, and DNS clients must reach the
+  NPM proxy IP. Existing NPM/Technitium services do not need restarting.
+
+### 2. Create the two files
+
+Use a **new, empty deployment directory**. Do not download over an existing
+installation's `.env` or replace its state configuration.
+
+```sh
+mkdir -m 700 ~/npm-technitium-safe-sync
+cd ~/npm-technitium-safe-sync
+umask 077
+curl --fail --silent --show-error --location https://raw.githubusercontent.com/dr-rei/npm-technitium-safe-sync/main/compose.quickstart.yaml --output compose.yaml
+curl --fail --silent --show-error --location https://raw.githubusercontent.com/dr-rei/npm-technitium-safe-sync/main/.env.quickstart.example --output .env
+chmod 600 .env
+nano .env
+```
+
+Alternatively, create the files manually using the exact contents below.
+[Compose preset](compose.quickstart.yaml) · [Environment template](.env.quickstart.example)
+
+<details>
+<summary>compose.yaml</summary>
+
+```yaml
+# Fresh installs: save as compose.yaml next to .env.quickstart.example renamed .env.
+name: npm-technitium-safe-sync
+services:
+  npm-technitium-safe-sync:
+    image: ${SYNC_IMAGE:?Set SYNC_IMAGE to the verified release image in .env}
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      NPM_URL: ${NPM_URL:?Set NPM_URL in .env}
+      NPM_IDENTITY: ${NPM_IDENTITY:?Set NPM_IDENTITY in .env}
+      NPM_SECRET: ${NPM_SECRET:?Set NPM_SECRET in .env}
+      TECHNITIUM_URL: ${TECHNITIUM_URL:?Set TECHNITIUM_URL in .env}
+      TECHNITIUM_TOKEN: ${TECHNITIUM_TOKEN:?Set TECHNITIUM_TOKEN in .env}
+      NPM_LAN_IP: ${NPM_LAN_IP:?Set NPM_LAN_IP in .env}
+      DNS_ZONES: ${DNS_ZONES:?Set DNS_ZONES in .env}
+    volumes:
+      - sync_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "10001:10001"
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 32
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  sync_data:
+```
+
+</details>
+
+<details>
+<summary>.env</summary>
+
+```dotenv
+# Fresh installs only. Save as .env next to compose.quickstart.yaml saved as compose.yaml.
+# Verified public 1.0.2 image; no registry login or local build is needed.
+SYNC_IMAGE=docker.io/drreilab/npm-technitium-safe-sync@sha256:867fdd742b8b1db614f45aed775702cac2e6bfa3d6537b5c176f0b3d62230dab
+NPM_URL=https://npm.internal.example.com
+NPM_IDENTITY=dns-sync@example.com
+# Use single quotes so dollar signs, hashes and spaces remain literal.
+# An apostrophe inside single quotes is escaped as \'. Never paste real secrets into chat.
+NPM_SECRET='REPLACE_WITH_NPM_ACCOUNT_PASSWORD'
+TECHNITIUM_URL=https://dns.internal.example.com
+TECHNITIUM_TOKEN='REPLACE_WITH_ZONE_SCOPED_API_TOKEN'
+TECHNITIUM_AUTH_MODE=bearer
+# Reachable IPv4 of NPM itself, not its backend; localhost is not the Docker host.
+NPM_LAN_IP=192.0.2.10
+DNS_ZONES=apps.example.com
+DNS_TTL_SECONDS=120
+SYNC_INTERVAL_SECONDS=300
+# This preset starts creating/updating owned A records immediately.
+# Set true for an initial preview with no DNS writes.
+DRY_RUN=false
+ENABLE_DELETIONS=false
+DELETE_GRACE_SECONDS=86400
+MAX_DELETES_PER_RUN=5
+ALLOW_EMPTY_NPM=false
+# Change to true only for HTTP management endpoints on a trusted isolated network.
+ALLOW_INSECURE_HTTP=false
+```
+
+</details>
+
+Replace these values in `.env`:
+
+| Setting | What to enter |
+| --- | --- |
+| `NPM_URL` | NPM **management/API** URL; commonly port 81 for HTTP, or its existing trusted HTTPS URL |
+| `NPM_IDENTITY` / `NPM_SECRET` | Dedicated NPM account email and password |
+| `TECHNITIUM_URL` | DNS server management/API URL; commonly port 5380 for HTTP, or its trusted HTTPS URL |
+| `TECHNITIUM_TOKEN` | Dedicated zone-scoped API token |
+| `NPM_LAN_IP` | IPv4 clients use to reach NPM on ports 80/443; **not** the upstream backend IP |
+| `DNS_ZONES` | Existing dedicated zone, for example `apps.example.com`; comma-separate nonoverlapping zones |
+
+Keep credentials single-quoted so `$`, `#`, spaces and backslashes stay literal;
+an apostrophe is written `\'` inside the quotes. Protect `.env` with mode 600 and
+keep it out of Git. Do not paste it into logs or chat. This simple preset puts
+credentials into the container environment, which Docker administrators can
+inspect. For file-mounted credentials, use the existing preset described below.
+Do not combine inline credentials with their `_FILE` equivalents.
+
+Use reachable LAN IPs/hostnames rather than `localhost`, which means the new
+container itself. Management hostnames must already resolve independently of
+this service. For HTTP endpoints such as `http://192.168.1.10:81` and
+`http://192.168.1.11:5380`, explicitly set `ALLOW_INSECURE_HTTP=true` only on a
+trusted isolated network. HTTPS remains the default. Private CAs need a mounted
+CA bundle as described under API compatibility; verification is never disabled.
+
+### 3. Start
+
+```sh
+docker compose up -d
+```
+
+Docker pulls the pinned image, creates the named state volume and starts the
+service. **This preset sets `DRY_RUN=false`: it starts creating/updating owned A
+records immediately once both APIs validate.** Existing manual DNS is preserved;
+deletion remains disabled. To preview first, set `DRY_RUN=true` before starting.
+The Python runtime default and the older file-secret template remain dry-run by
+default.
+
+For example, an enabled NPM proxy host `app.apps.example.com` is published as an
+A record pointing to `NPM_LAN_IP`. The zone apex and wildcard hosts are excluded.
+Polling defaults to 300 seconds; the first cycle begins on startup.
+
+### 4. Confirm operation
+
+```sh
+docker compose ps
+docker compose logs --tail=100 npm-technitium-safe-sync
+nslookup app.apps.example.com YOUR_TECHNITIUM_IP
+```
+
+Look for `Cycle completed`, review `added`, `updated` and `conflicts`, and test the
+application through NPM. Health becomes healthy after a completed cycle and the
+next health probe; it can initially show `starting`. Health includes dry-run and
+preserved conflicts, so it does not replace DNS/application checks. If there is
+an API, certificate, permission or storage error, the service logs a sanitized
+failure and retries. Correct `.env`, then apply changes with:
+
+```sh
+docker compose up -d --force-recreate
+```
+
+`docker compose restart` alone does not reload changed environment values.
+For optional configuration validation without printing credentials, use
+`docker compose config --quiet` and
+`docker compose run --rm npm-technitium-safe-sync --check`.
+
+### State, updates and backups
+
+The named volume is `npm-technitium-safe-sync_sync_data` under the preset's
+project name. Docker creates it automatically; ordinary container recreation and
+`docker compose down` preserve it. **Do not run `docker compose down -v`, remove
+or prune this volume, change the project name, or launch a second deployment
+against the same zones.** Losing ownership state causes existing records to be
+preserved as conflicts rather than automatically adopted.
+
+Before updating, stop the synchronizer and back up both state and Technitium
+zones. One state-backup method, while the service container still exists, is:
+
+```sh
+docker compose stop
+backup_dir="state-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -m 700 "$backup_dir"
+docker compose cp npm-technitium-safe-sync:/data/. "$backup_dir/"
+docker compose start
+```
+
+Update only `SYNC_IMAGE` to the next verified release digest, then use
+`docker compose pull` and `docker compose up -d --force-recreate`. Preserve `.env`
+and state; keep deletions off during upgrade validation. Rolling back the image
+does not undo DNS changes. Review coordinated state/zone backups before restoring.
+
+**Already deployed with `./data` and file secrets?** Keep the existing
+`compose.yaml`, `.env`, `data/` and `secrets/` setup. It remains supported. Update
+its image pin only; do not switch to the quickstart named volume without a
+planned, stopped-service state migration. The two presets are alternatives,
+not Compose files to merge.
+
+## Existing deployment / file-secret preset
+
+Requirements: Linux Docker Engine, Docker Compose v2, amd64 or arm64, and connectivity from the container to the management endpoints. Existing NPM and Technitium containers do not need restarting. The original `compose.yaml` uses file secrets and the existing `./data` bind mount; it pulls an image and contains no build instruction.
 
 1. Download `compose.yaml` and `.env.example` from the selected release, or clone this repository and check out its version tag.
 2. Back up your Technitium zone. Create an enabled **Primary** zone such as `apps.example.com`. Do not configure overlapping `DNS_ZONES`, zone apex hostnames, or separately hosted subzones.

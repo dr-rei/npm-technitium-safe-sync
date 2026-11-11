@@ -1,0 +1,35 @@
+# Fresh installs: save as compose.yaml next to .env.quickstart.example renamed .env.
+name: npm-technitium-safe-sync
+services:
+  npm-technitium-safe-sync:
+    image: ${SYNC_IMAGE:?Set SYNC_IMAGE to the verified release image in .env}
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      NPM_URL: ${NPM_URL:?Set NPM_URL in .env}
+      NPM_IDENTITY: ${NPM_IDENTITY:?Set NPM_IDENTITY in .env}
+      NPM_SECRET: ${NPM_SECRET:?Set NPM_SECRET in .env}
+      TECHNITIUM_URL: ${TECHNITIUM_URL:?Set TECHNITIUM_URL in .env}
+      TECHNITIUM_TOKEN: ${TECHNITIUM_TOKEN:?Set TECHNITIUM_TOKEN in .env}
+      NPM_LAN_IP: ${NPM_LAN_IP:?Set NPM_LAN_IP in .env}
+      DNS_ZONES: ${DNS_ZONES:?Set DNS_ZONES in .env}
+    volumes:
+      - sync_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "10001:10001"
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 32
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  sync_data:
