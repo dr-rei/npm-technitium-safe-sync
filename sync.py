@@ -24,6 +24,14 @@ MARKER = "managed-by:npm-technitium-safe-sync/v1"
 LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
+class SyncError(RuntimeError):
+    """An operator-facing message authored locally, without remote response data."""
+
+
+def error_summary(exc):
+    return str(exc) if isinstance(exc, SyncError) else type(exc).__name__
+
+
 def flag(name, default=False):
     value = os.environ.get(name, str(default)).strip().lower()
     if value not in ("true", "1", "yes", "on", "false", "0", "no", "off"):
@@ -87,7 +95,7 @@ def validate_config():
         raise ValueError("DNS_ZONES must be comma-separated DNS zone names")
     if len(set(cfg["zones"])) != len(cfg["zones"]) or any(a.endswith("." + b) for a in cfg["zones"] for b in cfg["zones"] if a != b):
         raise ValueError("DNS_ZONES must not overlap or repeat")
-    if cfg["ttl"] < 30 or cfg["interval"] < 30 or cfg["delete_grace"] < 300 or cfg["max_deletes"] < 0:
+    if not 30 <= cfg["ttl"] <= 2_147_483_647 or not 30 <= cfg["interval"] <= threading.TIMEOUT_MAX or cfg["delete_grace"] < 300 or cfg["max_deletes"] < 0:
         raise ValueError("Invalid interval/TTL/deletion safety limits")
     if cfg["state_path"].parent != Path("/data") and os.environ.get("STATE_FILE") is None:
         raise ValueError("State must be persisted")
@@ -96,7 +104,7 @@ def validate_config():
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise RuntimeError("API redirects are refused; configure the final management URL")
+        raise SyncError("API redirects are refused; configure the final management URL")
 
 
 def api(method, url, params=None, payload=None, headers=None):
@@ -118,16 +126,17 @@ def api(method, url, params=None, payload=None, headers=None):
         with opener.open(req, timeout=12) as response:
             body = response.read(4_000_001)
         if len(body) > 4_000_000:
-            raise RuntimeError("API response exceeds size limit")
+            raise SyncError("API response exceeds size limit")
         obj = json.loads(body)
     except urllib.error.HTTPError as exc:
-        raise RuntimeError("API HTTP status %d" % exc.code) from None
+        exc.close()
+        raise SyncError("API HTTP status %d" % exc.code) from None
     except (urllib.error.URLError, OSError, ValueError):
-        raise RuntimeError("API transport, TLS, or JSON failure") from None
+        raise SyncError("API transport, TLS, or JSON failure") from None
     if not isinstance(obj, (dict, list)):
-        raise RuntimeError("API returned an invalid JSON shape")
+        raise SyncError("API returned an invalid JSON shape")
     if isinstance(obj, dict) and obj.get("status") in ("error", "invalid-token", "2fa-required"):
-        raise RuntimeError("Technitium API rejected request: " + obj["status"])
+        raise SyncError("Technitium API rejected request: " + obj["status"])
     return obj
 
 
@@ -137,32 +146,32 @@ def npm_hosts(cfg):
                {"Content-Type": "application/json"})
     token = auth.get("token") if isinstance(auth, dict) else None
     if not isinstance(token, str) or not token:
-        raise RuntimeError("NPM authentication did not return a token")
+        raise SyncError("NPM authentication did not return a token")
     hosts = api("GET", cfg["npm_url"] + "/api/nginx/proxy-hosts",
                 headers={"Authorization": "Bearer " + token})
     if not isinstance(hosts, list):
-        raise RuntimeError("NPM proxy-host API did not return a list; refusing changes")
+        raise SyncError("NPM proxy-host API did not return a list; refusing changes")
     desired = set()
     enabled = 0
     for host in hosts:
         if not isinstance(host, dict) or "enabled" not in host or "domain_names" not in host:
-            raise RuntimeError("Malformed NPM host data; refusing changes")
+            raise SyncError("Malformed NPM host data; refusing changes")
         if type(host["enabled"]) not in (bool, int) or host["enabled"] not in (0, 1):
-            raise RuntimeError("Malformed NPM enabled value; refusing changes")
+            raise SyncError("Malformed NPM enabled value; refusing changes")
         names = host["domain_names"]
-        if not isinstance(names, list):
-            raise RuntimeError("Malformed NPM domain_names; refusing changes")
+        if not isinstance(names, list) or not names:
+            raise SyncError("Malformed NPM domain_names; refusing changes")
         for raw in names:
             if isinstance(raw, str) and raw.startswith("*.") and normalized_name(raw[2:]):
                 continue
             domain = normalized_name(raw)
             if not domain:
-                raise RuntimeError("Malformed NPM hostname; refusing changes")
+                raise SyncError("Malformed NPM hostname; refusing changes")
             if host["enabled"] and any(domain.endswith("." + zone) for zone in cfg["zones"]):
                 desired.add(domain)
         enabled += int(bool(host["enabled"]))
     if not desired and not cfg["allow_empty"]:
-        raise RuntimeError("NPM returned no permitted active hostnames; fail-closed (ALLOW_EMPTY_NPM=false)")
+        raise SyncError("NPM returned no permitted active hostnames; fail-closed (ALLOW_EMPTY_NPM=false)")
     LOG.info("Read %d NPM hosts, %d enabled, %d permitted unique names", len(hosts), enabled, len(desired))
     return desired
 
@@ -173,6 +182,7 @@ def zone_for(name, zones):
 
 
 def tech_call(cfg, path, params=None, write=False):
+    check_stop(cfg)
     params = dict(params or {})
     headers = {}
     if cfg.get("tech_auth", "bearer") == "parameter":
@@ -181,33 +191,34 @@ def tech_call(cfg, path, params=None, write=False):
         headers["Authorization"] = "Bearer " + cfg["dns_token"]
     result = api("POST", cfg["dns_url"] + path, payload=params, headers=headers)
     if not isinstance(result, dict) or result.get("status") != "ok":
-        raise RuntimeError("Unexpected Technitium response")
+        raise SyncError("Unexpected Technitium response")
     return result
 
 
 def dns_records(cfg):
     records = {}
     for zone in cfg["zones"]:
+        check_stop(cfg)
         obj = tech_call(cfg, "/api/zones/records/get", {"zone": zone, "domain": zone, "listZone": "true"})
         content = obj.get("response", {})
         info = content.get("zone", {})
         if info.get("name", "").rstrip(".").lower() != zone or info.get("type") != "Primary" or info.get("disabled") is not False:
-            raise RuntimeError("DNS zone '%s' must be an enabled Primary zone" % zone)
+            raise SyncError("DNS zone '%s' must be an enabled Primary zone" % zone)
         items = content.get("records")
         if not isinstance(items, list):
-            raise RuntimeError("DNS record listing for %s is invalid" % zone)
+            raise SyncError("DNS record listing for %s is invalid" % zone)
         for item in items:
             if not isinstance(item, dict):
-                raise RuntimeError("Malformed Technitium record")
+                raise SyncError("Malformed Technitium record")
             raw_name = item.get("name")
             if not isinstance(raw_name, str) or not isinstance(item.get("type"), str) or not isinstance(item.get("rData"), dict) or type(item.get("disabled")) is not bool:
-                raise RuntimeError("Malformed Technitium record fields")
+                raise SyncError("Malformed Technitium record fields")
             name = raw_name.rstrip(".").lower()
             # DNS owners (e.g. _acme-challenge TXT and _sip._tcp SRV) are broader
             # than hostnames. Keep NPM/state validation strict, not the zone listing.
             labels = name.removeprefix("*.").split(".")
             if len(name) > 253 or not all(re.fullmatch(r"[a-z0-9_-]{1,63}", label) for label in labels) or not (name == zone or name.endswith("." + zone)):
-                raise RuntimeError("Invalid or out-of-zone Technitium record")
+                raise SyncError("Invalid or out-of-zone Technitium record")
             records.setdefault(name, []).append(item)
     return records
 
@@ -228,7 +239,7 @@ def state_load(path):
         return {"version": 1, "owned": {}, "stale_since": {}}
     state = json.loads(path.read_text("utf-8"))
     if not isinstance(state, dict) or state.get("version") != 1 or not isinstance(state.get("owned"), dict) or not isinstance(state.get("stale_since"), dict):
-        raise RuntimeError("Incompatible or corrupt state file; refusing changes")
+        raise SyncError("Incompatible or corrupt state file; refusing changes")
     try:
         for name, address in state["owned"].items():
             if normalized_name(name) != name or str(ipaddress.IPv4Address(address)) != address:
@@ -237,7 +248,7 @@ def state_load(path):
             if name not in state["owned"] or type(since) not in (int, float) or not math.isfinite(since) or since < 0:
                 raise ValueError()
     except (ValueError, TypeError):
-        raise RuntimeError("Invalid ownership state; refusing changes") from None
+        raise SyncError("Invalid ownership state; refusing changes") from None
     return state
 
 
@@ -259,7 +270,7 @@ def state_save(path, state):
 
 def check_stop(cfg):
     if cfg.get("_stop_event") is not None and cfg["_stop_event"].is_set():
-        raise RuntimeError("Stop requested; no further DNS writes this cycle")
+        raise SyncError("Stop requested; no further DNS writes this cycle")
 
 
 def has_blocking_ancestor(domain, zone, snapshot):
@@ -280,12 +291,12 @@ def check_unchanged(cfg, domain, expected):
     """Reduce the read/write race; the upstream API has no conditional-write contract."""
     fresh = dns_records(cfg)
     if fresh.get(domain, []) != expected:
-        raise RuntimeError("DNS changed during reconciliation; refusing this write")
+        raise SyncError("DNS changed during reconciliation; refusing this write")
     zone = zone_for(domain, cfg["zones"])
     if zone is None:
-        raise RuntimeError("DNS name outside permitted zones")
+        raise SyncError("DNS name outside permitted zones")
     if has_blocking_ancestor(domain, zone, fresh):
-        raise RuntimeError("DNS delegation or alias blocks this write")
+        raise SyncError("DNS delegation or alias blocks this write")
     check_stop(cfg)
 
 
@@ -310,7 +321,7 @@ def reconcile(cfg, desired, snapshot, state, now=None):
         check_stop(cfg)
         zone = zone_for(domain, cfg["zones"])
         if zone is None:
-            raise RuntimeError("Desired name outside permitted zones")
+            raise SyncError("Desired name outside permitted zones")
         if has_blocking_ancestor(domain, zone, snapshot):
             changes["conflicts"] += 1
             LOG.warning("SKIP name below delegation or alias: %s", domain)
@@ -430,7 +441,7 @@ def main():
             try:
                 run_once(cfg)
             except Exception as exc:
-                LOG.error("Cycle FAILED (%s); inspect API connectivity, schema, permissions and state. Earlier writes may have completed.", type(exc).__name__)
+                LOG.error("Cycle FAILED (%s); inspect API connectivity, schema, permissions and state. Earlier writes may have completed.", error_summary(exc))
             stop.wait(cfg["interval"])
 
 
@@ -438,5 +449,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:
-        LOG.critical("Startup failed (%s); check required settings and state volume permissions", type(exc).__name__)
+        LOG.critical("Startup failed (%s); check required settings and state volume permissions", error_summary(exc))
         sys.exit(1)

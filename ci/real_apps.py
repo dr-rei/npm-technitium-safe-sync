@@ -98,7 +98,7 @@ def exercise(mode, npm_admin, dns_admin):
         admin_dns("/api/zones/create", {"zone": name, "type": "Primary"})
     admin_dns("/api/admin/users/create", {"user": reader, "pass": PASSWORD, "displayName": "CI sync reader"})
     admin_dns("/api/zones/permissions/set", {"zone": zone,
-              "userPermissions": "admin|true|true|true|" + reader + "|true|true|true"})
+              "userPermissions": "admin|true|true|true|" + reader + "|true|true|false"})
     dns_token = request(DNS, "/api/user/createToken",
                         {"user": reader, "pass": PASSWORD, "tokenName": "disposable-ci"}, form=True)["token"]
     conf = dict(npm_url=NPM, npm_identity=READER_EMAIL, npm_secret=PASSWORD,
@@ -131,6 +131,13 @@ def exercise(mode, npm_admin, dns_admin):
     snapshot = sync.dns_records(conf)
     check(sync.a_values(snapshot[app]) == ["192.0.2.21"] and snapshot[app][0]["ttl"] == 300,
           mode + ": actual update parameters and returned record metadata")
+    try:
+        sync.tech_call(conf, "/api/zones/records/delete", {"zone": zone, "domain": app,
+                       "type": "A", "ipAddress": conf["ip"]}, write=True)
+    except RuntimeError:
+        check(dns_answers(app) == [conf["ip"]], mode + ": View/Modify token cannot delete records")
+    else:
+        raise AssertionError("Token without Delete permission unexpectedly deleted a record")
     add_record(alias, "AAAA", ipAddress="2001:db8::1")
     conf["ip"] = "192.0.2.22"
     check(sync.run_once(conf)["conflicts"] == 2, mode + ": preserve mixed A/AAAA and manual CNAME")
@@ -161,6 +168,8 @@ def exercise(mode, npm_admin, dns_admin):
         "domain_names": [keeper], "forward_scheme": "http", "forward_host": "backend",
         "forward_port": 8080, "certificate_id": 0, "access_list_id": 0}, npm_admin)
     conf["deletions"] = True
+    admin_dns("/api/zones/permissions/set", {"zone": zone,
+              "userPermissions": "admin|true|true|true|" + reader + "|true|true|true"})
     check(sync.run_once(conf)["pending"] == 2, mode + ": disabled NPM host starts grace, another host retained")
     state = sync.state_load(conf["state_path"])
     for name in (app, alias):
@@ -186,6 +195,15 @@ def main():
     request(NPM, "/api/users/" + str(user["id"]) + "/permissions", {
         "visibility": "all", "proxy_hosts": "view", "redirection_hosts": "hidden",
         "dead_hosts": "hidden", "streams": "hidden", "access_lists": "hidden", "certificates": "hidden"}, npm_admin, method="PUT")
+    npm_reader = request(NPM, "/api/tokens", {"identity": READER_EMAIL, "secret": PASSWORD})["token"]
+    try:
+        request(NPM, "/api/nginx/proxy-hosts", {"domain_names": ["forbidden.sync.example.test"],
+                "forward_scheme": "http", "forward_host": "backend", "forward_port": 8080}, npm_reader)
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        check(exc.code == 403, "NPM view-only account cannot create proxy hosts")
+    else:
+        raise AssertionError("NPM view-only account unexpectedly created a proxy host")
     for mode in ("bearer", "parameter"):
         exercise(mode, npm_admin, dns_admin)
     print(json.dumps({"npm": "2.16.0", "technitium": "15.6.2", "checks_passed": len(CHECKS),

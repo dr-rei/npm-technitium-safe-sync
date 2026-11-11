@@ -69,6 +69,14 @@ class RegressionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sync.validate_config()
 
+    def test_config_rejects_overflowing_interval_and_dns_ttl(self):
+        for key, value in (("SYNC_INTERVAL_SECONDS", "100000000000000000000"),
+                           ("DNS_TTL_SECONDS", "4294967296"),
+                           ("DNS_TTL_SECONDS", "2147483648")):
+            with self.subTest(key=key, value=value), patch.dict(
+                    os.environ, self._base_environment(**{key: value}), clear=True):
+                with self.assertRaises(ValueError):
+                    sync.validate_config()
     def test_credentials_can_be_loaded_from_files_but_not_duplicated(self):
         with tempfile.TemporaryDirectory() as directory:
             npm_file = pathlib.Path(directory) / "npm-secret"
