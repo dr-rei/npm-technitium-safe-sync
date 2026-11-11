@@ -6,3 +6,24 @@ data/
 secrets/
 __pycache__/
 *.pyc
+
+# AI assistant and code-intelligence tooling (local only)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.serena/
+.gitnexus/
+AGENTS.md
+GEMINI.md
+.gemini/
+.cursor/
+.cursorrules
+.cursorignore
+.windsurf/
+.windsurfrules
+.codex/
+.aider*
+.continue/
+.copilot/
+.github/copilot-instructions.md
+.mcp.json
