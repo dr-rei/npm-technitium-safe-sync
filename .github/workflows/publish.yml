@@ -11,6 +11,8 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  real_apps:
+    uses: ./.github/workflows/real-apps.yml
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -34,7 +36,7 @@ jobs:
           if SYNC_IMAGE= docker compose config --quiet 2>/dev/null; then exit 1; fi
   publish:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
-    needs: verify
+    needs: [verify, real_apps]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:

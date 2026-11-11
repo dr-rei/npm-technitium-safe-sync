@@ -249,6 +249,17 @@ def state_save(path, state):
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
+    # Persist the directory entry as well as the file contents across power loss.
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def check_stop(cfg):
+    if cfg.get("_stop_event") is not None and cfg["_stop_event"].is_set():
+        raise RuntimeError("Stop requested; no further DNS writes this cycle")
 
 
 def has_blocking_ancestor(domain, zone, snapshot):
@@ -275,6 +286,7 @@ def check_unchanged(cfg, domain, expected):
         raise RuntimeError("DNS name outside permitted zones")
     if has_blocking_ancestor(domain, zone, fresh):
         raise RuntimeError("DNS delegation or alias blocks this write")
+    check_stop(cfg)
 
 
 def reconcile(cfg, desired, snapshot, state, now=None):
@@ -287,13 +299,15 @@ def reconcile(cfg, desired, snapshot, state, now=None):
 
     # Validated source presence ends absence, even when DNS conflicts or later
     # writes fail. Persist this before mutations so a restart cannot revive it.
-    reset_stale = any(domain in state["stale_since"] for domain in desired)
     for domain in desired:
         state["stale_since"].pop(domain, None)
-    if reset_stale:
-        commit()
+    # Verify durable storage before the first remote mutation. A later failure
+    # can still occur, so successful remote writes are committed individually.
+    check_stop(cfg)
+    commit()
 
     for domain in sorted(desired):
+        check_stop(cfg)
         zone = zone_for(domain, cfg["zones"])
         if zone is None:
             raise RuntimeError("Desired name outside permitted zones")
@@ -335,11 +349,16 @@ def reconcile(cfg, desired, snapshot, state, now=None):
                 commit()
             changes["updated"] += 1
     if cfg["deletions"]:
-        stale = sorted(set(state["owned"]) - desired)
+        absent = set(state["owned"]) - desired
+        stale = sorted(name for name in absent if zone_for(name, cfg["zones"]) is not None)
+        for domain in sorted(absent - set(stale)):
+            changes["conflicts"] += 1
+            LOG.warning("SKIP delete %s: outside current DNS_ZONES", domain)
         if len(stale) > cfg["max_deletes"]:
             LOG.error("Deletion cap exceeded (%d > %d); no deletions this cycle", len(stale), cfg["max_deletes"])
         else:
             for domain in stale:
+                check_stop(cfg)
                 since = state["stale_since"].setdefault(domain, now)
                 if now - since < cfg["delete_grace"]:
                     changes["pending"] += 1
@@ -369,8 +388,11 @@ def reconcile(cfg, desired, snapshot, state, now=None):
 
 
 def run_once(cfg):
+    check_stop(cfg)
     desired = npm_hosts(cfg)  # Read & validate entire source BEFORE any write
+    check_stop(cfg)
     snapshot = dns_records(cfg)  # Read & validate every zone BEFORE any write
+    check_stop(cfg)
     state = state_load(cfg["state_path"])
     result = reconcile(cfg, desired, snapshot, state)
     LOG.info("Cycle completed: %s", json.dumps(result, sort_keys=True))
@@ -395,6 +417,7 @@ def main():
         LOG.info("Configuration valid; no API requests made")
         return 0
     stop = threading.Event()
+    cfg["_stop_event"] = stop
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     cfg["state_path"].parent.mkdir(parents=True, exist_ok=True)
