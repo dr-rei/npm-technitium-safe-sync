@@ -62,6 +62,9 @@ nano .env
 
 Alternatively, create the files manually using the exact contents below.
 [Compose preset](compose.quickstart.yaml) · [Environment template](.env.quickstart.example)
+Or extract the [two-file 1.0.2 quickstart ZIP](https://github.com/dr-rei/npm-technitium-safe-sync/releases/download/v1.0.2/npm-technitium-safe-sync-1.0.2-quickstart.zip)
+into a new directory; it contains only `compose.yaml` and `.env`. Edit `.env`
+before starting.
 
 <details>
 <summary>compose.yaml</summary>
