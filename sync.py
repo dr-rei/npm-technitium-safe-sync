@@ -306,8 +306,8 @@ def reconcile(cfg, desired, snapshot, state, now=None):
             changes["conflicts"] += 1
             LOG.warning("SKIP managed %s: DNS changed or disappeared outside this service", domain)
             continue
-        if owned_ip != cfg["ip"]:
-            LOG.info("%s UPDATE %s A %s -> %s", "PLAN" if cfg["dry_run"] else "APPLY", domain, owned_ip, cfg["ip"])
+        if owned_ip != cfg["ip"] or existing[0].get("ttl") != cfg["ttl"]:
+            LOG.info("%s UPDATE %s A %s -> %s TTL %d", "PLAN" if cfg["dry_run"] else "APPLY", domain, owned_ip, cfg["ip"], cfg["ttl"])
             if not cfg["dry_run"]:
                 check_unchanged(cfg, domain, existing)
                 tech_call(cfg, "/api/zones/records/update", {

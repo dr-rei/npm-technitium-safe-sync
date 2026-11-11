@@ -80,6 +80,7 @@ class IntegrationTests(unittest.TestCase):
                     record = next(r for r in fixture.records if r["name"] == params["domain"])
                     fixture.assertEqual(record["rData"]["ipAddress"], params["ipAddress"])
                     record["rData"]["ipAddress"] = params["newIpAddress"]
+                    record["ttl"] = int(params["ttl"])
                 elif self.path.endswith("/delete"):
                     fixture.records[:] = [r for r in fixture.records if r["name"] != params["domain"]]
                 else:
@@ -121,6 +122,13 @@ class IntegrationTests(unittest.TestCase):
     def test_legacy_auth_body(self):
         self.conf["tech_auth"] = "parameter"
         self.assertEqual(sync.run_once(self.conf)["added"], 1)
+
+    def test_owned_ttl_change_is_reconciled(self):
+        sync.run_once(self.conf)
+        self.conf["ttl"] = 300
+        self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.assertEqual(self.records[0]["ttl"], 300)
+        self.assertEqual(sync.run_once(self.conf)["updated"], 0)
 
     def test_service_dns_owners_are_preserved(self):
         self.records = [{"name": "_acme-challenge.apps.example.com", "type": "TXT",
