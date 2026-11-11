@@ -93,6 +93,10 @@ docker compose up -d --force-recreate
 
 Back up zone + state before an update. Roll back by setting the previous verified digest and recreating the container. Rolling back an image does not undo DNS writes; restore DNS/state together only after stopping the service and reviewing the backup. Stop writes quickly with `docker compose stop`.
 
+## Docker Hub distribution
+
+The workflow also supports the configured Docker Hub destination `docker.io/drreilab/npm-technitium-safe-sync`. Activation requires a public repository, GitHub publishing secret and explicit enable variable. See [DOCKERHUB.md](DOCKERHUB.md) for setup, verification and deployment. A configured destination does not establish that an image has been published.
+
 ## GHCR permissions and release workflow
 
 Public source does **not** automatically make the GHCR package public. The package owner must set its package visibility to **Public**. Anonymous manifest/pull checks are required before advertising public access. A public image can be pulled without `docker login`.
