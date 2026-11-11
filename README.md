@@ -25,7 +25,7 @@ Tests include local HTTP fixtures and disposable real NPM **2.16.0** / Technitiu
 ## Production quickstart: two files, then up
 
 For a **fresh installation**, you need only `compose.yaml` and `.env`. The preset
-pulls the verified public **1.0.2** image by digest, creates persistent storage
+pulls the verified public **1.0.3** image by digest, creates persistent storage
 with the correct nonroot ownership, and starts polling automatically. No source
 checkout, local build, secret files, host data directory or manual `chown` is
 required. Existing installations should use the upgrade instructions below and
@@ -62,7 +62,7 @@ nano .env
 
 Alternatively, create the files manually using the exact contents below.
 [Compose preset](compose.quickstart.yaml) · [Environment template](.env.quickstart.example)
-Or extract the [two-file 1.0.2 quickstart ZIP](https://github.com/dr-rei/npm-technitium-safe-sync/releases/download/v1.0.2/npm-technitium-safe-sync-1.0.2-quickstart.zip)
+Or extract the [two-file 1.0.3 quickstart ZIP](https://github.com/dr-rei/npm-technitium-safe-sync/releases/download/v1.0.3/npm-technitium-safe-sync-1.0.3-quickstart.zip)
 into a new directory; it contains only `compose.yaml` and `.env`. Edit `.env`
 before starting.
 
@@ -114,8 +114,8 @@ volumes:
 
 ```dotenv
 # Fresh installs only. Save as .env next to compose.quickstart.yaml saved as compose.yaml.
-# Verified public 1.0.2 image; no registry login or local build is needed.
-SYNC_IMAGE=docker.io/drreilab/npm-technitium-safe-sync@sha256:867fdd742b8b1db614f45aed775702cac2e6bfa3d6537b5c176f0b3d62230dab
+# Verified public 1.0.3 image; no registry login or local build is needed.
+SYNC_IMAGE=docker.io/drreilab/npm-technitium-safe-sync@sha256:4299bf92c27a35958eec6b495df6814db5e82504a9515c3a4403f327e801d4b8
 NPM_URL=https://npm.internal.example.com
 NPM_IDENTITY=dns-sync@example.com
 # Use single quotes so dollar signs, hashes and spaces remain literal.
@@ -291,6 +291,10 @@ NPM uses `POST /api/tokens` then `GET /api/nginx/proxy-hosts` with a bearer toke
 
 Use trusted HTTPS certificates, final URLs without redirects, and firewalls limiting management-port access. HTTP requires `ALLOW_INSECURE_HTTP=true` and sends credentials in plaintext. For a private CA, mount a CA bundle read-only and set `SSL_CERT_FILE` to its container path; do not disable TLS verification. Ambient HTTP proxy variables are intentionally ignored. When using host management endpoints from Docker, `localhost` refers to this new container; use reachable host/IP addresses or appropriate Docker networks.
 
+## Reliability repairs in 1.0.3
+
+Version 1.0.3 fixes updates and deletions of records that DNS clients query: Technitium rewrites each record's `lastUsedOn` on every answer, which the pre-write reread treated as a concurrent edit, aborting the cycle. NPM hostnames that cannot be DNS names (such as `nas` or `my_app.lan`) outside `DNS_ZONES` no longer halt synchronization. Each write now rereads only its target zone, and the health heartbeat is replaced atomically. State format, ownership marker and defaults are unchanged; upgrade by replacing the image digest and keeping the existing state mount.
+
 ## Operational repairs in 1.0.2
 
 Version 1.0.2 repairs state-storage preflight, deletion accounting after zone removal, in-cycle shutdown, malformed empty host lists and oversized settings. It also adds actionable safe API diagnostics and requires real-app tests before image publication. See [INTEGRATION_REVIEW.md](INTEGRATION_REVIEW.md). Back up zones and state, stage the new digest with deletion off, and review conflicts before production writes.
@@ -303,13 +307,13 @@ When upgrading from 1.0.0, first disable deletions and back up zone + state. The
 
 ## Version pinning, updates and rollback
 
-Production should set `SYNC_IMAGE=ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<verified-index-digest>` in `.env`. The release evidence includes an actual digest after publication. Version tag `:1.0.2` is readable but tags can be moved; a digest pins exact image content. `:main` tracks development and is not a production pin. GHCR has no floating `latest` tag; Docker Hub `latest` follows the GitHub Latest stable release.
+Production should set `SYNC_IMAGE=ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<verified-index-digest>` in `.env`. The release evidence includes an actual digest after publication. Version tag `:1.0.3` is readable but tags can be moved; a digest pins exact image content. `:main` tracks development and is not a production pin. GHCR has no floating `latest` tag; Docker Hub `latest` follows the GitHub Latest stable release.
 
 The workflow builds `linux/amd64` and `linux/arm64`. Main pushes publish `:main` to GHCR only. Version tags publish `:MAJOR.MINOR.PATCH` to both enabled registries; Docker Hub `latest` follows GitHub Latest. No new commit-hash tags are created. Docker Hub shows only `latest` and numbered releases. Use a digest for immutability. Releases must use new version numbers; never retag an existing release.
 
 ```sh
 # Verify the selected version, copy its digest into .env, then pull it.
-docker buildx imagetools inspect ghcr.io/dr-rei/npm-technitium-safe-sync:1.0.2
+docker buildx imagetools inspect ghcr.io/dr-rei/npm-technitium-safe-sync:1.0.3
 docker compose pull
 docker compose up -d --force-recreate
 ```
