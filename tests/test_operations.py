@@ -34,7 +34,7 @@ class OperationTests(unittest.TestCase):
                 for zone, kind in (("apps.example.com", "Primary"), ("other.example.com", "Secondary"))]
             with patch.object(sync, "npm_hosts", return_value={"app.apps.example.com"}), \
                     patch.object(sync, "tech_call", side_effect=responses) as api:
-                with self.assertRaisesRegex(RuntimeError, "enabled Primary"):
+                with self.assertRaisesRegex(RuntimeError, "enabled Primary or Forwarder"):
                     sync.run_once(conf)
                 self.assertEqual(api.call_count, 2)
                 self.assertTrue(all(call.args[1].endswith("/get") for call in api.call_args_list))
@@ -62,6 +62,25 @@ class OperationTests(unittest.TestCase):
                     patch.object(sync, "tech_call", return_value={"status": "ok"}) as api:
                 self.assertEqual(sync.run_once(conf)["added"], 1)
                 self.assertEqual(api.call_args.args[2]["domain"], "b.apps.example.com")
+
+    def test_mixed_primary_and_nested_forwarder_zones_route_by_longest_match(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = cfg(Path(d) / "state.json")
+            conf["zones"] = ("example.com", "lan.example.com")
+            types = {"example.com": "Primary", "lan.example.com": "Forwarder"}
+            writes = []
+            def fake(config, path, params=None, write=False):
+                if path.endswith("/get"):
+                    zone = params["zone"]
+                    return {"status": "ok", "response": {"zone": {"name": zone, "type": types[zone], "disabled": False},
+                            "records": [{"name": zone, "type": "SOA", "disabled": False, "rData": {}}]}}
+                writes.append((params["zone"], params["domain"]))
+                return {"status": "ok"}
+            with patch.object(sync, "npm_hosts", return_value={"app.lan.example.com", "www.example.com"}),                     patch.object(sync, "tech_call", side_effect=fake) as api:
+                self.assertEqual(sync.run_once(conf)["added"], 2)
+            self.assertEqual(sorted(writes), [("example.com", "www.example.com"), ("lan.example.com", "app.lan.example.com")])
+            rereads = [c.args[2]["zone"] for c in api.call_args_list if c.args[1].endswith("/get")][2:]
+            self.assertEqual(rereads, ["lan.example.com", "example.com"])
 
     def test_pre_write_reread_reads_only_the_target_zone(self):
         conf = cfg(Path("/nonexistent/state.json"))

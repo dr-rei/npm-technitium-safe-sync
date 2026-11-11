@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.5
+
+- Support Technitium Forwarder (conditional-forwarder) zones in addition to Primary zones, for split DNS: NPM hostnames become local A overrides and all other names and record types are still forwarded.
+- Treat a `FWD` record below the zone apex like an NS delegation on both the initial snapshot and the pre-write reread; apex forwarding stays allowed and untouched.
+- A delegation, forwarding rule or alias added above an owned name now skips that name's deletion as a conflict instead of failing the whole cycle (and the healthcheck) every interval.
+- Keep refusing replica zone types (Secondary, SecondaryForwarder, Stub, Catalog) with an updated message.
+- Real-app CI adds a Forwarder-zone lifecycle against Technitium 15.6.2; document zone-type choice, the forwarded-AAAA caveat and that upstream-only names are not visible to the no-adoption check.
+
 ## 1.0.4
 
 - CI now upgrades from the published release pinned in the quickstart template to each candidate image on the same named volume and requires the previous release's state to survive.

@@ -205,6 +205,12 @@ def tech_call(cfg, path, params=None, write=False):
     return result
 
 
+# Zones whose local records Technitium answers authoritatively. In a Forwarder
+# (conditional forwarder) zone, local records override the forwarder and every
+# other name or record type is still forwarded. Secondary/Stub zones are replicas.
+WRITABLE_ZONE_TYPES = frozenset({"Primary", "Forwarder"})
+
+
 def dns_records(cfg, zones=None):
     records = {}
     for zone in (cfg["zones"] if zones is None else zones):
@@ -212,8 +218,8 @@ def dns_records(cfg, zones=None):
         obj = tech_call(cfg, "/api/zones/records/get", {"zone": zone, "domain": zone, "listZone": "true"})
         content = obj.get("response", {})
         info = content.get("zone", {})
-        if info.get("name", "").rstrip(".").lower() != zone or info.get("type") != "Primary" or info.get("disabled") is not False:
-            raise SyncError("DNS zone '%s' must be an enabled Primary zone" % zone)
+        if info.get("name", "").rstrip(".").lower() != zone or info.get("type") not in WRITABLE_ZONE_TYPES or info.get("disabled") is not False:
+            raise SyncError("DNS zone '%s' must be an enabled Primary or Forwarder zone" % zone)
         items = content.get("records")
         if not isinstance(items, list):
             raise SyncError("DNS record listing for %s is invalid" % zone)
@@ -284,13 +290,14 @@ def check_stop(cfg):
 
 
 def has_blocking_ancestor(domain, zone, snapshot):
-    """Apex NS is normal authority; apex aliases still block descendant writes."""
+    """Apex NS/FWD are normal zone authority/forwarding; below the apex they hand the
+    subtree to another server. Aliases block descendant writes even at the apex."""
     labels = domain.split(".")
     for i in range(1, len(labels)):
         parent = ".".join(labels[i:])
         for record in snapshot.get(parent, []):
             kind = record.get("type")
-            if kind in ("DNAME", "CNAME") or (kind == "NS" and parent != zone):
+            if kind in ("DNAME", "CNAME") or (kind in ("NS", "FWD") and parent != zone):
                 return True
         if parent == zone:
             break
@@ -315,7 +322,7 @@ def check_unchanged(cfg, domain, expected):
     if stable_records(fresh.get(domain, [])) != stable_records(expected):
         raise SyncError("DNS changed during reconciliation; refusing this write")
     if has_blocking_ancestor(domain, zone, fresh):
-        raise SyncError("DNS delegation or alias blocks this write")
+        raise SyncError("DNS delegation, forwarding or alias blocks this write")
     check_stop(cfg)
 
 
@@ -343,7 +350,7 @@ def reconcile(cfg, desired, snapshot, state, now=None):
             raise SyncError("Desired name outside permitted zones")
         if has_blocking_ancestor(domain, zone, snapshot):
             changes["conflicts"] += 1
-            LOG.warning("SKIP name below delegation or alias: %s", domain)
+            LOG.warning("SKIP name below delegation, forwarding or alias: %s", domain)
             continue
         existing = snapshot.get(domain, [])
         owned_ip = state["owned"].get(domain)
@@ -403,6 +410,12 @@ def reconcile(cfg, desired, snapshot, state, now=None):
                 if not can_change(existing, old_ip):
                     changes["conflicts"] += 1
                     LOG.warning("SKIP delete %s: record no longer matches owned state", domain)
+                    continue
+                # Same guard as the pre-write reread, applied up front so a newly added
+                # delegation/forwarding/alias is a per-name conflict, not a failed cycle.
+                if has_blocking_ancestor(domain, target_zone, snapshot):
+                    changes["conflicts"] += 1
+                    LOG.warning("SKIP delete %s: now below delegation, forwarding or alias", domain)
                     continue
                 LOG.warning("%s DELETE %s A %s", "PLAN" if cfg["dry_run"] else "APPLY", domain, old_ip)
                 if not cfg["dry_run"]:

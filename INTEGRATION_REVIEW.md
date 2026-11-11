@@ -46,7 +46,8 @@ State format version 1, ownership marker and conservative defaults are unchanged
 | Manual records | Actual CNAME/TXT/mixed A+AAAA/changed comment; local disabled/multiple/changed-IP cases |
 | Deletion | Actual disabled source, grace, explicit deletion and authoritative absence; local cap/returning-source timer/removed-zone cases |
 | Multiple zones | Invalid second zone prevents all mutations; overlapping configuration is rejected |
-| Alias/delegation | Local initial/final rereads for NS/CNAME/DNAME, apex aliases and normal SOA/NS |
+| Alias/delegation | Local initial/final rereads for NS/FWD/CNAME/DNAME, apex aliases and normal SOA/NS/FWD |
+| Forwarder zones (1.0.5) | Actual Forwarder zone: local override create, authoritative answer, IP update, grace deletion, subtree FWD refusal, apex forwarding rule preserved; local replica-type refusal |
 | Failure recovery | Local HTTP/redirect/schema/size/corrupt-state/storage tests; successful first-write persistence, retry, orphan refusal |
 | Container operation | CI nonroot/read-only/no-external-network local tests, startup smoke, lock, health and Compose validation |
 | Distribution | Both test jobs gate publication; published image checks include anonymous pulls and amd64/arm64 startup |
@@ -58,7 +59,7 @@ uses isolated HTTP and does not verify your TLS chain, firewall or reverse proxy
 ## Limits and recovery
 
 - Supported synchronization is IPv4 A records for enabled NPM proxy hosts beneath
-  allowed enabled Primary zones. Wildcards, apex names, generated AAAA, redirects,
+  allowed enabled Primary or Forwarder zones. Wildcards, apex names, generated AAAA, redirects,
   404 hosts, streams and upstream-service IPs are outside scope. Missing owned
   records and existing unowned records are preserved as conflicts.
 - A nonempty partial NPM source cannot reliably be distinguished from removals.

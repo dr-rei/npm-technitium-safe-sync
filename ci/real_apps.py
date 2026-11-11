@@ -193,6 +193,49 @@ def exercise(mode, npm_admin, dns_admin):
     check(keep_proxy["id"] != proxy["id"], mode + ": independent active source host exercised")
 
 
+def exercise_forwarder(npm_admin, dns_admin):
+    """Split DNS: local overrides inside a conditional-forwarder zone."""
+    zone = "fwd.sync.example.test"
+    app, nested = "app." + zone, "app.branch." + zone
+    reader = "reader-forwarder"
+    def admin_dns(path, data):
+        return request(DNS, path, data, dns_admin, form=True)
+    # The upstream is unreachable on the internal network; local records need none.
+    admin_dns("/api/zones/create", {"zone": zone, "type": "Forwarder", "forwarder": "192.0.2.53", "protocol": "Udp"})
+    admin_dns("/api/zones/records/add", {"zone": zone, "domain": "branch." + zone, "type": "FWD",
+                                         "forwarder": "192.0.2.54", "protocol": "Udp"})
+    admin_dns("/api/admin/users/create", {"user": reader, "pass": PASSWORD, "displayName": "CI forwarder reader"})
+    admin_dns("/api/zones/permissions/set", {"zone": zone,
+              "userPermissions": "admin|true|true|true|" + reader + "|true|true|true"})
+    token = request(DNS, "/api/user/createToken", {"user": reader, "pass": PASSWORD, "tokenName": "ci-fwd"}, form=True)["token"]
+    conf = dict(npm_url=NPM, npm_identity=READER_EMAIL, npm_secret=PASSWORD, dns_url=DNS, dns_token=token,
+                tech_auth="bearer", ip=socket.gethostbyname("npm"), zones=(zone,), interval=300, ttl=120,
+                dry_run=False, deletions=True, delete_grace=300, max_deletes=5, allow_empty=True,
+                state_path=Path("/data/forwarder/state.json"))
+    conf["state_path"].parent.mkdir(parents=True)
+    proxy = request(NPM, "/api/nginx/proxy-hosts", {
+        "domain_names": [app, nested], "forward_scheme": "http", "forward_host": "backend",
+        "forward_port": 8080, "certificate_id": 0, "access_list_id": 0}, npm_admin)
+    apex = sync.stable_records([r for r in sync.dns_records(conf)[zone] if r["type"] == "FWD"])
+    result = sync.run_once(conf)
+    check(result["added"] == 1 and result["conflicts"] == 1,
+          "forwarder: create local override; refuse name below subtree FWD")
+    check(dns_answers(app) == [conf["ip"]], "forwarder: authoritative local A answer")
+    conf["ip"] = "192.0.2.31"
+    check(sync.run_once(conf)["updated"] == 1 and dns_answers(app) == ["192.0.2.31"],
+          "forwarder: IP update through actual API")
+    request(NPM, "/api/nginx/proxy-hosts/" + str(proxy["id"]) + "/disable", {}, npm_admin)
+    check(sync.run_once(conf)["pending"] == 1, "forwarder: removed host starts grace")
+    state = sync.state_load(conf["state_path"])
+    state["stale_since"][app] = int(time.time()) - 301
+    sync.state_save(conf["state_path"], state)
+    check(sync.run_once(conf)["deleted"] == 1, "forwarder: grace deletion through actual API")
+    # After deletion the name is forwarded again (to the unreachable upstream), so check via the API.
+    snapshot = sync.dns_records(conf)
+    check(app not in snapshot and sync.stable_records([r for r in snapshot[zone] if r["type"] == "FWD"]) == apex,
+          "forwarder: override removed, apex forwarding rule untouched")
+
+
 def main():
     if os.environ.get("CI_DISPOSABLE_APPS") != "1":
         raise SystemExit("Run only with the disposable internal-network CI application fixtures")
@@ -215,6 +258,7 @@ def main():
         raise AssertionError("NPM view-only account unexpectedly created a proxy host")
     for mode in ("bearer", "parameter"):
         exercise(mode, npm_admin, dns_admin)
+    exercise_forwarder(npm_admin, dns_admin)
     print(json.dumps({"npm": "2.16.0", "technitium": "15.6.2", "checks_passed": len(CHECKS),
                       "scope": "disposable real applications; no production credentials or endpoints"}), flush=True)
 

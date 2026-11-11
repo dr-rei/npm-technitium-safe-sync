@@ -1,6 +1,6 @@
 # NPM → Technitium Safe Sync
 
-Poll enabled Nginx Proxy Manager proxy hosts and reconcile their hostnames to IPv4 `A` records in dedicated Technitium Primary zones. Every managed name points to **the NPM reverse proxy IP**, not its upstream service IP. Other record types, wildcard hosts, apex names, redirection hosts, and 404 hosts are excluded.
+Poll enabled Nginx Proxy Manager proxy hosts and reconcile their hostnames to IPv4 `A` records in Technitium Primary or Forwarder (split-DNS) zones. Every managed name points to **the NPM reverse proxy IP**, not its upstream service IP. Other record types, wildcard hosts, apex names, redirection hosts, and 404 hosts are excluded.
 
 Project-maintained container image, identical in both registries: `docker.io/drreilab/npm-technitium-safe-sync` and `ghcr.io/dr-rei/npm-technitium-safe-sync`. To deploy, follow the [production quickstart](#production-quickstart-two-files-then-up); to update, see [Update to a new version](#update-to-a-new-version). This is not affiliated with NPM or Technitium and does not carry Docker's Official Image badge.
 
@@ -50,9 +50,10 @@ by default).
 ### 2. Prepare Technitium
 
 1. **Back up** Technitium first (Settings page, backup option).
-2. **Create the zone(s).** Zones → **Add Zone** → type **Primary**, name for
-   example `apps.example.com`. Repeat for each zone you want synchronized. The
-   tool never creates zones; each one must exist, be enabled and be Primary.
+2. **Create the zone(s).** Zones → **Add Zone**, name for example
+   `apps.example.com`, and choose the type (see the table below). Repeat for each
+   zone you want synchronized. The tool never creates zones; each one must exist,
+   be enabled and be **Primary** or **Forwarder**.
 3. **Create a dedicated user.** Administration → Users → Add User, for example
    `dns-sync`, with a strong password.
 4. **Grant zone permissions.** For each zone: Zones → the zone's menu →
@@ -62,13 +63,42 @@ by default).
    **Create Token**, choose `dns-sync`, and copy the token. Store it safely; never
    paste it into chat, tickets or Git.
 
-> **Is the zone also your public domain?** Creating a Primary zone such as
-> `abhatigroup.com` makes Technitium the only source of answers for that whole
-> domain for clients that use it (split DNS). Public records you still need
-> internally (`www`, `MX`, externally hosted services) must be added to the zone
-> by hand, or they stop resolving inside your network. To avoid that, use a
-> subdomain zone such as `int.abhatigroup.com` and name NPM hosts beneath it.
-> The tool never changes records it did not create.
+**Which zone type?**
+
+| Your domain | Zone type | What happens |
+| --- | --- | --- |
+| Also used on the internet (for example your company domain `abhatigroup.com`) | **Forwarder** | NPM hostnames get local A records pointing to NPM. Every other name (`www`, mail, external services) is still answered by the DNS server you forward to. Nothing has to be copied |
+| Internal only (for example `apps.example.com`, `corp.lan`) | **Primary** | Technitium answers every name in the zone itself; names without a record do not exist |
+
+To create a **Forwarder** zone: Zones → Add Zone → type **Forwarder**, and as
+the forwarder enter the DNS server that should answer everything else in that
+domain (your public DNS provider, or your internal/AD DNS). Technitium checks its
+local records first and forwards only what it does not have. An existing
+Forwarder zone works as it is.
+
+> **IPv6 in Forwarder zones:** the tool creates only `A` (IPv4) records. Queries
+> for other record types are still forwarded, so if the public DNS has an `AAAA`
+> (IPv6) record for an NPM hostname, IPv6-capable clients receive that public
+> address and may bypass NPM. Check each hostname with
+> `nslookup -type=AAAA erp.abhatigroup.com <TECHNITIUM-IP>`; it should return no
+> address. If it returns one, remove the public AAAA record or disable IPv6 for
+> that name. Primary zones are not affected.
+
+> **Upstream names are not checked in Forwarder zones:** the tool sees only the
+> records stored in Technitium, not names that exist on the server you forward
+> to. Every enabled NPM hostname in the zone therefore gets a local A record
+> pointing to NPM, even if the upstream DNS already has that name with another
+> address. For split DNS that is the goal (the public name points to your public
+> IP, the internal one to NPM), but it also means an NPM host accidentally named
+> like an existing server (for example `mail` or `vpn`) would redirect that name
+> to NPM for internal clients. Run the first start with `DRY_RUN=true` and check
+> each `PLAN ADD` name. In Primary zones, every existing name is visible and
+> preserved.
+
+The tool never changes records it did not create, including the forwarding rule.
+A `FWD` record on a sub-name (forwarding a whole subtree elsewhere) is treated
+like a delegation: names beneath it are skipped, and records the tool already
+owns beneath it are no longer changed or deleted (logged as conflicts).
 
 ### 3. Prepare Nginx Proxy Manager
 
@@ -230,7 +260,8 @@ ALLOW_INSECURE_HTTP=false
 `DNS_ZONES=abhatigroup.com,abhati.local,example.org`. Each NPM host goes into the
 zone its name falls under, and all records point to the same `NPM_LAN_IP`.
 
-- Every listed zone must exist as an enabled Primary zone, and the token needs
+- Every listed zone must exist as an enabled Primary or Forwarder zone (types may
+  be mixed), and the token needs
   View + Modify on **each** one. If any listed zone is missing or unreadable, that
   cycle writes nothing in any zone.
 - Zones must not overlap or repeat: `abhatigroup.com,int.abhatigroup.com` is
@@ -304,11 +335,11 @@ The service never logs passwords, tokens or raw API responses. After fixing
 | `Technitium API rejected request: invalid-token` | Wrong, expired or deleted Technitium token |
 | `API redirects are refused` | The URL redirects (for example HTTP → HTTPS). Use the final URL |
 | `Technitium API rejected request: error` | A zone in `DNS_ZONES` does not exist (check spelling), or the token's user lacks View/Modify permission on it |
-| `DNS zone '…' must be an enabled Primary zone` | The zone exists but is disabled, or is a Secondary, Forwarder or other non-Primary zone |
+| `DNS zone '…' must be an enabled Primary or Forwarder zone` | The zone exists but is disabled, or is a Secondary, Secondary Forwarder, Stub or Catalog zone (read-only copies). Use the zone on the server that owns it, or convert it |
 | `NPM returned no permitted active hostnames` | No enabled NPM host is inside `DNS_ZONES`, or the NPM user cannot see them (check **All Items**) |
 | `SKIP unmanaged existing DNS name …` | A record you created already uses that name. It is left alone; delete it in Technitium if this tool should manage the name |
 | `SKIP managed …: DNS changed or disappeared outside this service` | Someone edited or removed a record this tool created. It is never silently overwritten; resolve it deliberately |
-| `SKIP name below delegation or alias` | A parent name has an NS, CNAME or DNAME record, so a record here would be ignored by resolvers |
+| `SKIP name below delegation, forwarding or alias` | A parent name has an NS, FWD, CNAME or DNAME record, so a record here would be ignored or forwarded elsewhere |
 | `Cycle FAILED (…)` | A temporary API failure. The service retries after the polling interval; earlier writes in that cycle are kept |
 
 ### 9. Optional: automatic deletions
@@ -482,7 +513,7 @@ unzip npm-technitium-safe-sync-1.0.4-deployment.zip
 
 If `unzip` is missing on Ubuntu, install it with `sudo apt install unzip`.
 
-2. Back up your Technitium zone. Create an enabled **Primary** zone such as `apps.example.com`. Do not configure overlapping `DNS_ZONES`, zone apex hostnames, or separately hosted subzones.
+2. Back up your Technitium zone. Create an enabled **Primary** or **Forwarder** zone such as `apps.example.com` (see [Which zone type?](#2-prepare-technitium)). Do not configure overlapping `DNS_ZONES`, zone apex hostnames, or separately hosted subzones.
 3. Create a dedicated NPM account with permission to view **all intended proxy hosts**. A restricted account that sees only some hosts is an incomplete source and could make others look stale. Verify `GET /api/nginx/proxy-hosts` with this account. Recheck access whenever ownership or permissions change. Keep deletion disabled until source visibility is established.
 4. Create a dedicated Technitium user/token with **View + Modify** on the permitted zones only. Grant zone **Delete** only if enabling deletion. No global administrator token is required. Rotate these credentials using the same scoped accounts.
 5. Prepare the deployment directory on the Linux Docker host:
@@ -526,6 +557,16 @@ NPM uses `POST /api/tokens` then `GET /api/nginx/proxy-hosts` with a bearer toke
 `TECHNITIUM_AUTH_MODE=bearer` targets Technitium **15+**, whose API documents bearer authentication. For older Technitium versions use `parameter`; the token is sent in a POST form body, never a query URL. All Technitium calls use POST forms. Both modes are tested against actual Technitium 15.6.2; older releases and your installed configuration still need staging validation.
 
 Use trusted HTTPS certificates, final URLs without redirects, and firewalls limiting management-port access. HTTP requires `ALLOW_INSECURE_HTTP=true` and sends credentials in plaintext. For a private CA, mount a CA bundle read-only and set `SSL_CERT_FILE` to its container path; do not disable TLS verification. Ambient HTTP proxy variables are intentionally ignored. When using host management endpoints from Docker, `localhost` refers to this new container; use reachable host/IP addresses or appropriate Docker networks.
+
+## Forwarder zones in 1.0.5
+
+Version 1.0.5 adds Technitium **Forwarder** (conditional-forwarder) zones next to
+Primary zones, for split DNS on a public domain: NPM hostnames get local A
+overrides and everything else is forwarded. A `FWD` record below the zone apex is
+treated like a delegation. Replica zones (Secondary, Secondary Forwarder, Stub,
+Catalog) remain refused. Primary-zone behavior, state format, ownership marker and
+defaults are unchanged; upgrade by replacing `SYNC_IMAGE` as described in
+[Update to a new version](#update-to-a-new-version).
 
 ## Upgrade assurance in 1.0.4
 

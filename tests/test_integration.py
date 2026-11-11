@@ -28,6 +28,7 @@ class IntegrationTests(unittest.TestCase):
         self.writes = []
         self.requests = []
         self.queried = False
+        self.zone_type = "Primary"
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -74,7 +75,8 @@ class IntegrationTests(unittest.TestCase):
                         for record in fixture.records:
                             record["lastUsedOn"] = "2026-11-11T08:23:%09.6fZ" % (time.time() % 60)
                     return self.respond({"status": "ok", "response": {
-                        "zone": {"name": "apps.example.com", "type": "Primary", "disabled": False},
+                        "zone": {"name": "apps.example.com", "disabled": False, "type": fixture.zone_type()
+                                 if callable(fixture.zone_type) else fixture.zone_type},
                         "records": fixture.records}})
                 fixture.writes.append((self.path, params))
                 if self.path.endswith("/add"):
@@ -145,7 +147,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(self.records[:2], manual)
 
     def test_blocked_return_resets_delete_grace_timer(self):
-        for blocker in ("NS", "DNAME", "CNAME"):
+        for blocker in ("NS", "FWD", "DNAME", "CNAME"):
             with self.subTest(blocker=blocker):
                 self.conf["state_path"].unlink(missing_ok=True)
                 self.records = []
@@ -208,6 +210,99 @@ class IntegrationTests(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         sync.run_once(self.conf)
                 self.assertEqual(self.writes, [])
+
+    # Apex shape returned by real Technitium 15.6.2 for a Forwarder zone.
+    FORWARDER_APEX = [
+        {"name": "apps.example.com", "type": "SOA", "ttl": 0, "disabled": False, "rData": {"serial": 1}},
+        {"name": "apps.example.com", "type": "FWD", "ttl": 0, "disabled": False,
+         "rData": {"protocol": "Udp", "forwarder": "192.0.2.53", "priority": 0}}]
+
+    def test_forwarder_zone_full_lifecycle(self):
+        self.zone_type = "Forwarder"
+        self.records = copy.deepcopy(self.FORWARDER_APEX)
+        self.assertEqual(sync.run_once(self.conf)["added"], 1)
+        self.assertEqual(sync.run_once(self.conf)["added"], 0)
+        self.conf["ip"] = "192.0.2.21"
+        self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.conf.update(deletions=True, allow_empty=True)
+        self.hosts = []
+        sync.run_once(self.conf)
+        state = sync.state_load(self.conf["state_path"])
+        state["stale_since"]["app.apps.example.com"] = time.time() - 86401
+        sync.state_save(self.conf["state_path"], state)
+        self.assertEqual(sync.run_once(self.conf)["deleted"], 1)
+        self.assertEqual(self.records, self.FORWARDER_APEX)  # Forwarding rule untouched.
+
+    def test_replica_and_unknown_zone_types_refuse_all_writes(self):
+        for kind in ("Secondary", "SecondaryForwarder", "Stub", "Catalog", "SecondaryCatalog", "primary", None):
+            with self.subTest(kind=kind):
+                self.zone_type = kind
+                with self.assertRaisesRegex(RuntimeError, "enabled Primary or Forwarder"):
+                    sync.run_once(self.conf)
+                self.assertEqual(self.writes, [])
+
+    def test_subtree_forwarding_blocks_names_beneath_it(self):
+        for zone_type in ("Forwarder", "Primary"):
+            with self.subTest(zone_type=zone_type):
+                self.conf["state_path"].unlink(missing_ok=True)
+                self.zone_type = zone_type
+                self.writes.clear()
+                self.records = copy.deepcopy(self.FORWARDER_APEX) + [
+                    {"name": "branch.apps.example.com", "type": "FWD", "disabled": False,
+                     "rData": {"protocol": "Udp", "forwarder": "192.0.2.54"}}]
+                self.hosts = [{"enabled": True, "domain_names": ["app.branch.apps.example.com", "app.apps.example.com"]}]
+                result = sync.run_once(self.conf)
+                self.assertEqual((result["added"], result["conflicts"]), (1, 1))
+                self.assertEqual([w[1]["domain"] for w in self.writes], ["app.apps.example.com"])
+
+    def test_subtree_forwarding_added_on_final_reread_refuses_write(self):
+        self.zone_type = "Forwarder"
+        self.hosts = [{"enabled": True, "domain_names": ["app.branch.apps.example.com"]}]
+        apex = {"apps.example.com": copy.deepcopy(self.FORWARDER_APEX)}
+        after = dict(apex, **{"branch.apps.example.com": [
+            {"name": "branch.apps.example.com", "type": "FWD", "disabled": False, "rData": {}}]})
+        with patch.object(sync, "dns_records", side_effect=[apex, after]):
+            with self.assertRaisesRegex(RuntimeError, "forwarding"):
+                sync.run_once(self.conf)
+        self.assertEqual(self.writes, [])
+
+    def test_npm_name_that_owns_forwarding_is_unmanaged(self):
+        self.zone_type = "Forwarder"
+        self.records = copy.deepcopy(self.FORWARDER_APEX) + [
+            {"name": "branch.apps.example.com", "type": "FWD", "disabled": False, "rData": {"forwarder": "192.0.2.54"}}]
+        self.hosts = [{"enabled": True, "domain_names": ["branch.apps.example.com"]}]
+        result = sync.run_once(self.conf)
+        self.assertEqual((result["added"], result["conflicts"]), (0, 1))
+        self.assertEqual(self.writes, [])
+
+    def test_forwarding_added_above_owned_name_skips_delete_and_cycle_completes(self):
+        self.zone_type = "Forwarder"
+        self.records = copy.deepcopy(self.FORWARDER_APEX)
+        self.conf.update(deletions=True, delete_grace=300)
+        self.hosts = [{"enabled": True, "domain_names": ["app.branch.apps.example.com", "keep.apps.example.com"]}]
+        self.assertEqual(sync.run_once(self.conf)["added"], 2)
+        self.hosts = [{"enabled": True, "domain_names": ["keep.apps.example.com"]}]
+        self.records.append({"name": "branch.apps.example.com", "type": "FWD", "disabled": False,
+                             "rData": {"forwarder": "192.0.2.54"}})
+        state = sync.state_load(self.conf["state_path"])
+        state["stale_since"]["app.branch.apps.example.com"] = 1
+        sync.state_save(self.conf["state_path"], state)
+        heartbeat = self.conf["state_path"].parent / "last_success"
+        heartbeat.unlink()
+        self.writes.clear()
+        result = sync.run_once(self.conf)  # Must not raise.
+        self.assertEqual((result["deleted"], result["conflicts"]), (0, 1))
+        self.assertEqual(self.writes, [])
+        self.assertTrue(heartbeat.exists())
+        self.assertIn("app.branch.apps.example.com", sync.state_load(self.conf["state_path"])["owned"])
+
+    def test_zone_type_change_before_write_refuses(self):
+        types = iter(["Forwarder", "SecondaryForwarder"])
+        self.zone_type = lambda: next(types)
+        self.records = copy.deepcopy(self.FORWARDER_APEX)
+        with self.assertRaisesRegex(RuntimeError, "enabled Primary or Forwarder"):
+            sync.run_once(self.conf)
+        self.assertEqual(self.writes, [])
 
     def test_normal_apex_soa_and_ns_allow_child_add(self):
         self.records = [{"name": "apps.example.com", "type": "SOA", "disabled": False, "rData": {}},
