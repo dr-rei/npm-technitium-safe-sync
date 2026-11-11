@@ -208,7 +208,9 @@ For optional configuration validation without printing credentials, use
 ### State, updates and backups
 
 The named volume is `npm-technitium-safe-sync_sync_data` under the preset's
-project name. Docker creates it automatically; ordinary container recreation and
+fixed project name. This preset represents one deployment per Docker host: a
+second directory using the same project name manages the same service and volume.
+Docker creates the volume automatically; ordinary container recreation and
 `docker compose down` preserve it. **Do not run `docker compose down -v`, remove
 or prune this volume, change the project name, or launch a second deployment
 against the same zones.** Losing ownership state causes existing records to be

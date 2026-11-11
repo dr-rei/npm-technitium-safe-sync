@@ -26,6 +26,8 @@ jobs:
           docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 256m -v "$PWD/tests:/tests:ro" --entrypoint python sync:test -m unittest discover -s /tests -v
           sh tests/container-smoke.sh sync:test
           sh tests/quickstart-smoke.sh sync:test
+          # Exercise the exact public image used by the README as well as the candidate.
+          sh tests/quickstart-smoke.sh docker.io/drreilab/npm-technitium-safe-sync@sha256:867fdd742b8b1db614f45aed775702cac2e6bfa3d6537b5c176f0b3d62230dab
       - name: Validate deployment configuration and image pin
         run: |
           cp .env.example .env

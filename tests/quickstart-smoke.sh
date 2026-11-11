@@ -4,6 +4,7 @@ set -eu
 image="${1:?test image required}"
 project="sync-quickstart-ci-${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT:-1}"
 fixture="$(mktemp -d)"
+export QUICKSTART_LITERAL=SHOULD_NOT_EXPAND
 compose() { (cd "$fixture" && docker compose -p "$project" "$@"); }
 cleanup() {
   # Only the uniquely named disposable test project is removed, including its volume.
@@ -19,8 +20,8 @@ value = Path('.env.quickstart.example').read_text()
 value = value.replace(next(line for line in value.splitlines() if line.startswith('SYNC_IMAGE=')), 'SYNC_IMAGE=' + sys.argv[2])
 value = value.replace('https://npm.internal.example.com', 'https://127.0.0.1:1')
 value = value.replace('https://dns.internal.example.com', 'https://127.0.0.1:1')
-value = value.replace("'REPLACE_WITH_NPM_ACCOUNT_PASSWORD'", "' literal-$# space and \\' quote '")
-value = value.replace("'REPLACE_WITH_ZONE_SCOPED_API_TOKEN'", "'dummy-$#token'")
+value = value.replace("'REPLACE_WITH_NPM_ACCOUNT_PASSWORD'", "' literal-$QUICKSTART_LITERAL ${QUICKSTART_LITERAL} # space and \\' quote '")
+value = value.replace("'REPLACE_WITH_ZONE_SCOPED_API_TOKEN'", "'dummy-$QUICKSTART_LITERAL-${QUICKSTART_LITERAL}#token'")
 Path(sys.argv[1]).write_text(value)
 PY
 compose config --quiet
@@ -47,8 +48,8 @@ import os
 from pathlib import Path
 import sync
 assert os.getuid() == 10001 and not os.access("/app/sync.py", os.W_OK)
-assert os.environ["NPM_SECRET"] == " literal-$# space and '\'' quote "
-assert os.environ["TECHNITIUM_TOKEN"] == "dummy-$#token"
+assert os.environ["NPM_SECRET"] == " literal-$QUICKSTART_LITERAL ${QUICKSTART_LITERAL} # space and '\'' quote "
+assert os.environ["TECHNITIUM_TOKEN"] == "dummy-$QUICKSTART_LITERAL-${QUICKSTART_LITERAL}#token"
 assert not Path("/data/state.json").exists()
 state = {"version": 1, "owned": {"app.apps.example.com": "192.0.2.20"}, "stale_since": {}}
 sync.state_save(Path("/data/state.json"), state)
