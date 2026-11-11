@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.4
 
 - CI now upgrades from the published release pinned in the quickstart template to each candidate image on the same named volume and requires the previous release's state to survive.
 - Document the update, rollback, backup and restore steps, and which Docker commands keep or destroy the state volume. Restore writes state as the service user so it stays writable.
