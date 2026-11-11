@@ -1,0 +1,55 @@
+name: Sync GitHub release image versions
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing published stable release, for example v1.0.1
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: dockerhub-release-versions
+  cancel-in-progress: false
+jobs:
+  sync:
+    if: vars.DOCKERHUB_ENABLED == 'true' && ((github.event_name == 'release' && github.event.release.draft == false && github.event.release.prerelease == false) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Validate release script syntax
+        run: bash -n scripts/sync-release-image.sh
+      - name: Install registry copy tool from Ubuntu packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends skopeo
+          skopeo --version
+      - name: Copy and verify the published release
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: bash scripts/sync-release-image.sh
+      - name: Verify anonymous Docker and Compose pulls
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          digest="$(cat "$RUNNER_TEMP/verified-release-digest")"
+          image="docker.io/drreilab/npm-technitium-safe-sync@$digest"
+          anonymous_config="$(mktemp -d)"
+          DOCKER_CONFIG="$anonymous_config" docker pull "$image"
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 32 --memory 128m --env-file tests/fixtures/smoke.env "$image" --check
+          cp .env.example .env
+          mkdir -p secrets data
+          printf dummy > secrets/npm_secret
+          printf dummy > secrets/technitium_token
+          SYNC_IMAGE="$image" docker compose config --quiet
+          DOCKER_CONFIG="$anonymous_config" SYNC_IMAGE="$image" docker compose pull
