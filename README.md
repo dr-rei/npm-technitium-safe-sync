@@ -80,7 +80,7 @@ When upgrading from 1.0.0, first disable deletions and back up zone + state. The
 
 ## Version pinning, updates and rollback
 
-Production should set `SYNC_IMAGE=ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<verified-index-digest>` in `.env`. The release evidence includes an actual digest after publication. Version tag `:1.0.1` is readable but tags can be moved; a digest pins exact image content. `:main` tracks development and is not a production pin. No floating `latest` tag is published.
+Production should set `SYNC_IMAGE=ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<verified-index-digest>` in `.env`. The release evidence includes an actual digest after publication. Version tag `:1.0.1` is readable but tags can be moved; a digest pins exact image content. `:main` tracks development and is not a production pin. GHCR has no floating `latest` tag; Docker Hub `latest` follows the GitHub Latest stable release.
 
 The workflow builds `linux/amd64` and `linux/arm64`, publishes `:main` for main pushes, `:MAJOR.MINOR.PATCH` for `vMAJOR.MINOR.PATCH` tags, plus full `:sha-<commit>` tags. SHA tags may refer to the most recent build for that commit (e.g. main versus a release); use a digest for immutability. Releases must use new version numbers; never retag an existing release.
 
