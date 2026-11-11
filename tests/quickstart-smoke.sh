@@ -54,6 +54,15 @@ assert not Path("/data/state.json").exists()
 state = {"version": 1, "owned": {"app.apps.example.com": "192.0.2.20"}, "stale_since": {}}
 sync.state_save(Path("/data/state.json"), state)
 '
+# The README backup command must work against the stopped service container.
+mkdir "$fixture/state-backup"
+compose cp npm-technitium-safe-sync:/data/. "$fixture/state-backup/"
+python3 - "$fixture/state-backup/state.json" <<'PY'
+from pathlib import Path
+import json
+import sys
+assert json.loads(Path(sys.argv[1]).read_text())["owned"] == {"app.apps.example.com": "192.0.2.20"}
+PY
 # Ordinary down and recreation must retain ownership, unlike down --volumes.
 compose down
 compose run --rm --no-deps --entrypoint python npm-technitium-safe-sync -c '
