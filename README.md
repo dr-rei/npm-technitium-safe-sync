@@ -1,4 +1,4 @@
-# NPM â†’ Technitium Safe Sync
+# NPM → Technitium Safe Sync
 
 Poll enabled Nginx Proxy Manager proxy hosts and reconcile their hostnames to IPv4 `A` records in dedicated Technitium Primary zones. Every managed name points to **the NPM reverse proxy IP**, not its upstream service IP. Other record types, wildcard hosts, apex names, redirection hosts, and 404 hosts are excluded.
 
@@ -24,28 +24,66 @@ Tests include local HTTP fixtures and disposable real NPM **2.16.0** / Technitiu
 
 ## Production quickstart: two files, then up
 
-For a **fresh installation**, you need only `compose.yaml` and `.env`. The preset
-pulls the verified public **1.0.3** image by digest, creates persistent storage
-with the correct nonroot ownership, and starts polling automatically. No source
-checkout, local build, secret files, host data directory or manual `chown` is
-required. Existing installations should use the upgrade instructions below and
-preserve their existing state mount.
+For a **fresh installation** you need only two files, `compose.yaml` and `.env`.
+The preset pulls the verified public **1.0.3** image by digest, creates its own
+persistent storage with the correct nonroot ownership, and starts polling. No
+source checkout, build, secret files, host data directory or `chown` is needed.
+Already running an older version? Skip to [State, updates and backups](#state-updates-and-backups).
 
-### 1. Prepare the existing apps
+**What you end up with:** every *enabled* NPM proxy host whose name is inside one
+of your `DNS_ZONES` gets an `A` record in Technitium that points to the NPM server.
+For example, with `DNS_ZONES=abhatigroup.com` and `NPM_LAN_IP=192.168.1.10`, the
+NPM hosts `erp.abhatigroup.com` and `hr.dept.abhatigroup.com` both resolve to
+`192.168.1.10`. New NPM hosts appear in DNS within one polling interval (5 minutes
+by default).
 
-- Ubuntu/Linux with Docker Engine and **Docker Compose v2**, on amd64 or arm64.
-  If needed, follow [Docker's Ubuntu installation instructions](https://docs.docker.com/engine/install/ubuntu/), including the Compose plugin.
-- Back up Technitium, then create an enabled **Primary** zone such as
-  `apps.example.com`. This application does not create zones or accounts.
-- Create a dedicated NPM account with **view access to all intended proxy hosts**.
-  Use that account's password, not a registry token. Incomplete visibility can
-  make valid hosts appear absent; keep deletion off initially.
-- Create a Technitium account/API token with **View + Modify** on that zone only.
-  Zone Delete permission is unnecessary while deletions are disabled.
-- The container must reach both management URLs, and DNS clients must reach the
-  NPM proxy IP. Existing NPM/Technitium services do not need restarting.
+### 1. Check the Docker host
 
-### 2. Create the two files
+- Linux (for example Ubuntu) on amd64 or arm64 with Docker Engine and **Docker
+  Compose v2**. Check with `docker compose version`; if it is missing, follow
+  [Docker's Ubuntu installation instructions](https://docs.docker.com/engine/install/ubuntu/),
+  including the Compose plugin.
+- This can be the Technitium server, the NPM server or any other host, as long as
+  it can reach both management URLs (NPM, usually port 81; Technitium, usually
+  port 5380). Existing NPM and Technitium services do not need restarting.
+
+### 2. Prepare Technitium
+
+1. **Back up** Technitium first (Settings page, backup option).
+2. **Create the zone(s).** Zones → **Add Zone** → type **Primary**, name for
+   example `apps.example.com`. Repeat for each zone you want synchronized. The
+   tool never creates zones; each one must exist, be enabled and be Primary.
+3. **Create a dedicated user.** Administration → Users → Add User, for example
+   `dns-sync`, with a strong password.
+4. **Grant zone permissions.** For each zone: Zones → the zone's menu →
+   **Permissions** → add `dns-sync` with **View** and **Modify**. Add **Delete**
+   only if you later enable deletions. No global administrator rights are needed.
+5. **Create an API token for that user.** Administration → Sessions →
+   **Create Token**, choose `dns-sync`, and copy the token. Store it safely; never
+   paste it into chat, tickets or Git.
+
+> **Is the zone also your public domain?** Creating a Primary zone such as
+> `abhatigroup.com` makes Technitium the only source of answers for that whole
+> domain for clients that use it (split DNS). Public records you still need
+> internally (`www`, `MX`, externally hosted services) must be added to the zone
+> by hand, or they stop resolving inside your network. To avoid that, use a
+> subdomain zone such as `int.abhatigroup.com` and name NPM hosts beneath it.
+> The tool never changes records it did not create.
+
+### 3. Prepare Nginx Proxy Manager
+
+1. Users → **Add User**, for example `dns-sync@example.com`. Do not tick
+   Administrator.
+2. Open the new user's menu → **Permissions**: set **Item Visibility: All Items**
+   and **Proxy Hosts: View Only**; everything else can be Hidden.
+3. Open the user's menu → **Change Password** and set its password.
+
+**All Items matters:** with "Created Items Only" the account sees only its own
+hosts, so other users' hosts get no DNS records (and, with deletions enabled,
+would look removed). NPM proxy hosts must use names inside your zones, for
+example `app.apps.example.com`.
+
+### 4. Create the two files
 
 Use a **new, empty deployment directory**. Do not download over an existing
 installation's `.env` or replace its state configuration.
@@ -142,71 +180,148 @@ ALLOW_INSECURE_HTTP=false
 
 </details>
 
-Replace these values in `.env`:
+### 5. Configure `.env`
 
-| Setting | What to enter |
-| --- | --- |
-| `NPM_URL` | NPM **management/API** URL; commonly port 81 for HTTP, or its existing trusted HTTPS URL |
-| `NPM_IDENTITY` / `NPM_SECRET` | Dedicated NPM account email and password |
-| `TECHNITIUM_URL` | DNS server management/API URL; commonly port 5380 for HTTP, or its trusted HTTPS URL |
-| `TECHNITIUM_TOKEN` | Dedicated zone-scoped API token |
-| `NPM_LAN_IP` | IPv4 clients use to reach NPM on ports 80/443; **not** the upstream backend IP |
-| `DNS_ZONES` | Existing dedicated zone, for example `apps.example.com`; comma-separate nonoverlapping zones |
+**Required: replace these placeholders**
 
-Keep credentials single-quoted so `$`, `#`, spaces and backslashes stay literal;
-an apostrophe is written `\'` inside the quotes. Protect `.env` with mode 600 and
-keep it out of Git. Do not paste it into logs or chat. This simple preset puts
-credentials into the container environment, which Docker administrators can
-inspect. For file-mounted credentials, use the existing preset described below.
-Do not combine inline credentials with their `_FILE` equivalents.
+| Setting | Example | What to enter |
+| --- | --- | --- |
+| `NPM_URL` | `http://192.168.1.10:81` | NPM **admin/API** URL (the web UI address), not a proxied site |
+| `NPM_IDENTITY` | `dns-sync@example.com` | Email of the NPM user from step 3 |
+| `NPM_SECRET` | `'Pa$$ word#1'` | That user's password, **in single quotes** |
+| `TECHNITIUM_URL` | `http://192.168.1.11:5380` | Technitium web console URL |
+| `TECHNITIUM_TOKEN` | `'0123abcd…'` | API token from step 2, **in single quotes** |
+| `NPM_LAN_IP` | `192.168.1.10` | IPv4 address clients use to reach **NPM** on ports 80/443. Not a backend app's IP |
+| `DNS_ZONES` | `apps.example.com` | Your zone; several zones are comma-separated (see below) |
 
-Use reachable LAN IPs/hostnames rather than `localhost`, which means the new
-container itself. Management hostnames must already resolve independently of
-this service. For HTTP endpoints such as `http://192.168.1.10:81` and
-`http://192.168.1.11:5380`, explicitly set `ALLOW_INSECURE_HTTP=true` only on a
-trusted isolated network. HTTPS remains the default. Private CAs need a mounted
-CA bundle as described under API compatibility; verification is never disabled.
+**Optional: the defaults are safe**
 
-### 3. Start
+| Setting | Template value | Meaning |
+| --- | --- | --- |
+| `SYNC_IMAGE` | verified 1.0.3 digest | Image to run. Change it only when upgrading |
+| `TECHNITIUM_AUTH_MODE` | `bearer` | `bearer` for Technitium 15+; `parameter` for older servers (token sent in the POST body) |
+| `DNS_TTL_SECONDS` | `120` | TTL of created records, 30 or more |
+| `SYNC_INTERVAL_SECONDS` | `300` | Seconds between polls, 30 or more |
+| `DRY_RUN` | `false` | `true` = only log what would change. **Use `true` for your first start** |
+| `ENABLE_DELETIONS` | `false` | `true` = remove records this tool created after their NPM host is gone. Keep `false` at first |
+| `DELETE_GRACE_SECONDS` | `86400` | How long a host must stay absent before its record is deleted (minimum 300) |
+| `MAX_DELETES_PER_RUN` | `5` | If more names than this are waiting, **no** deletions happen that cycle |
+| `ALLOW_EMPTY_NPM` | `false` | `true` only if NPM may legitimately have no matching hosts; otherwise an empty list is treated as an error |
+| `ALLOW_INSECURE_HTTP` | `false` | Must be `true` when either URL starts with `http://`. Use only on a trusted LAN |
+
+**Rules that prevent most mistakes**
+
+- **Never use `localhost` or `127.0.0.1`** in the URLs: inside the container that
+  means the container itself. Use the host's LAN IP, even when NPM or Technitium
+  run on the same machine.
+- **Quote credentials with single quotes** so `$`, `#`, spaces and backslashes
+  stay literal. An apostrophe inside the quotes is written `\'`.
+- `http://` URLs are refused unless `ALLOW_INSECURE_HTTP=true`. With HTTPS, the
+  certificate must be trusted; for a private CA see
+  [API compatibility and transport](#api-compatibility-and-transport).
+- Use the final URL: redirects (for example HTTP → HTTPS) are refused.
+- Protect `.env` (`chmod 600`), keep it out of Git and never paste it anywhere.
+  This preset passes credentials as container environment variables, which Docker
+  administrators can inspect; for file-mounted credentials use the
+  [file-secret preset](#existing-deployment--file-secret-preset). Do not combine
+  inline credentials with their `_FILE` equivalents.
+
+**Multiple zones:** list them comma-separated, for example
+`DNS_ZONES=abhatigroup.com,abhati.local,example.org`. Each NPM host goes into the
+zone its name falls under, and all records point to the same `NPM_LAN_IP`.
+
+- Every listed zone must exist as an enabled Primary zone, and the token needs
+  View + Modify on **each** one. If any listed zone is missing or unreadable, that
+  cycle writes nothing in any zone.
+- Zones must not overlap or repeat: `abhatigroup.com,int.abhatigroup.com` is
+  rejected. The parent zone alone already covers every name beneath it.
+- Zones served by different NPM servers need one deployment per NPM server, each
+  on its own Docker host with its own state.
+
+**What is never synchronized:** the zone name itself (`apps.example.com`),
+wildcard hosts (`*.apps.example.com`), disabled NPM hosts, names outside
+`DNS_ZONES`, redirection/404/stream hosts, and IPv6 (`AAAA`). NPM names that can
+never be DNS names, such as `nas` or `my_app.lan`, are ignored with a warning.
+
+### 6. Start in preview mode
+
+With `DRY_RUN=true` in `.env`:
 
 ```sh
+docker compose config --quiet
 docker compose up -d
+docker compose logs -f npm-technitium-safe-sync
 ```
 
-Docker pulls the pinned image, creates the named state volume and starts the
-service. **This preset sets `DRY_RUN=false`: it starts creating/updating owned A
-records immediately once both APIs validate.** Existing manual DNS is preserved;
-deletion remains disabled. To preview first, set `DRY_RUN=true` before starting.
-The Python runtime default and the older file-secret template remain dry-run by
-default.
+`config --quiet` reports Compose errors without printing your credentials.
+Docker pulls the pinned image, creates the named state volume and starts the first
+cycle immediately. Healthy output looks like this (timestamps omitted):
 
-For example, an enabled NPM proxy host `app.apps.example.com` is published as an
-A record pointing to `NPM_LAN_IP`. The zone apex and wildcard hosts are excluded.
-Polling defaults to 300 seconds; the first cycle begins on startup.
-
-### 4. Confirm operation
-
-```sh
-docker compose ps
-docker compose logs --tail=100 npm-technitium-safe-sync
-nslookup app.apps.example.com YOUR_TECHNITIUM_IP
+```text
+Read 12 NPM hosts, 11 enabled, 9 permitted unique names
+PLAN ADD erp.apps.example.com A 192.168.1.10
+SKIP unmanaged existing DNS name wiki.apps.example.com (manual DNS preserved)
+Cycle completed: {"added": 8, "conflicts": 1, "deleted": 0, "pending": 0, "updated": 0}
 ```
 
-Look for `Cycle completed`, review `added`, `updated` and `conflicts`, and test the
-application through NPM. Health becomes healthy after a completed cycle and the
-next health probe; it can initially show `starting`. Health includes dry-run and
-preserved conflicts, so it does not replace DNS/application checks. If there is
-an API, certificate, permission or storage error, the service logs a sanitized
-failure and retries. Correct `.env`, then apply changes with:
+Check that every `PLAN ADD` name and IP is what you expect. Press Ctrl+C to stop
+following the log; the service keeps running.
+
+### 7. Go live
+
+Set `DRY_RUN=false` in `.env`, then recreate the container (a plain
+`docker compose restart` does **not** reload `.env`):
 
 ```sh
 docker compose up -d --force-recreate
+docker compose logs --tail=50 npm-technitium-safe-sync
+nslookup erp.apps.example.com 192.168.1.11
+curl -I --resolve erp.apps.example.com:443:192.168.1.10 https://erp.apps.example.com/
 ```
 
-`docker compose restart` alone does not reload changed environment values.
-For optional configuration validation without printing credentials, use
-`docker compose config --quiet` and
-`docker compose run --rm npm-technitium-safe-sync --check`.
+The log now shows `APPLY ADD …`. `nslookup` against the Technitium IP must return
+`NPM_LAN_IP`, and `curl` confirms NPM serves the site. Finally, make sure your
+clients use Technitium as their DNS server (router DHCP or device settings);
+otherwise they never see the new names.
+
+`docker compose ps` shows `healthy` after the first completed cycle and the next
+health probe (it can show `starting` before that). Healthy means cycles complete;
+it does not prove every name resolves, so also watch `conflicts` in the log.
+
+### 8. Troubleshooting
+
+The service never logs passwords, tokens or raw API responses. After fixing
+`.env`, always run `docker compose up -d --force-recreate`.
+
+| Log message | Cause and fix |
+| --- | --- |
+| `Startup failed (ValueError)` | A setting has an invalid value: an `http://` URL without `ALLOW_INSECURE_HTTP=true`, a bad IP, zone list, number or boolean, an empty credential, or overlapping zones. Compare `.env` with the tables above |
+| `Startup failed (KeyError)` | A required setting is missing from `.env` |
+| `Startup failed (BlockingIOError)` | Another copy is already running against the same state volume. Run only one |
+| `API transport, TLS, or JSON failure` | URL unreachable, wrong port, `localhost` used, firewall, or untrusted HTTPS certificate |
+| `API HTTP status 4xx` (for example 400, 401, 403) | Wrong NPM email or password, wrong URL path, or insufficient permissions |
+| `NPM authentication did not return a token` | The NPM login did not complete, for example because the account requires 2FA. Use a dedicated account without 2FA |
+| `Technitium API rejected request: invalid-token` | Wrong, expired or deleted Technitium token |
+| `API redirects are refused` | The URL redirects (for example HTTP → HTTPS). Use the final URL |
+| `Technitium API rejected request: error` | A zone in `DNS_ZONES` does not exist (check spelling), or the token's user lacks View/Modify permission on it |
+| `DNS zone '…' must be an enabled Primary zone` | The zone exists but is disabled, or is a Secondary, Forwarder or other non-Primary zone |
+| `NPM returned no permitted active hostnames` | No enabled NPM host is inside `DNS_ZONES`, or the NPM user cannot see them (check **All Items**) |
+| `SKIP unmanaged existing DNS name …` | A record you created already uses that name. It is left alone; delete it in Technitium if this tool should manage the name |
+| `SKIP managed …: DNS changed or disappeared outside this service` | Someone edited or removed a record this tool created. It is never silently overwritten; resolve it deliberately |
+| `SKIP name below delegation or alias` | A parent name has an NS, CNAME or DNAME record, so a record here would be ignored by resolvers |
+| `Cycle FAILED (…)` | A temporary API failure. The service retries after the polling interval; earlier writes in that cycle are kept |
+
+### 9. Optional: automatic deletions
+
+After the service has run correctly for a while and NPM visibility is confirmed:
+
+1. Give `dns-sync` **Delete** permission on each zone in Technitium.
+2. Set `ENABLE_DELETIONS=true` and recreate the container.
+
+Only records this tool created are ever deleted, only after their host has been
+absent from NPM for `DELETE_GRACE_SECONDS` (24 hours by default), and at most
+`MAX_DELETES_PER_RUN` per cycle. Disabling an NPM host counts as removal. Records
+in zones you remove from `DNS_ZONES` are kept and must be cleaned up by hand.
 
 ### State, updates and backups
 
