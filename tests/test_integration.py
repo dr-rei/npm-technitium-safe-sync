@@ -122,6 +122,15 @@ class IntegrationTests(unittest.TestCase):
         self.conf["tech_auth"] = "parameter"
         self.assertEqual(sync.run_once(self.conf)["added"], 1)
 
+    def test_service_dns_owners_are_preserved(self):
+        self.records = [{"name": "_acme-challenge.apps.example.com", "type": "TXT",
+                         "disabled": False, "rData": {"text": "dummy-challenge"}},
+                        {"name": "_sip._tcp.apps.example.com", "type": "SRV",
+                         "disabled": False, "rData": {"target": "sip.example.com"}}]
+        manual = copy.deepcopy(self.records)
+        self.assertEqual(sync.run_once(self.conf)["added"], 1)
+        self.assertEqual(self.records[:2], manual)
+
     def test_malformed_source_never_writes_or_deletes(self):
         sync.run_once(self.conf)
         self.writes.clear()

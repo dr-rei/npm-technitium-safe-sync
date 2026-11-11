@@ -85,14 +85,20 @@ jobs:
         env:
           IMAGE: ${{ steps.image.outputs.name }}
           DIGEST: ${{ steps.build.outputs.digest }}
+          PUBLIC_REPOSITORY: ${{ github.event.repository.private == false }}
         run: |
           docker buildx imagetools inspect "$IMAGE@$DIGEST"
           docker pull "$IMAGE@$DIGEST"
           sh tests/container-smoke.sh "$IMAGE@$DIGEST"
+          docker run --rm --platform linux/arm64 --network none --read-only --cap-drop ALL --security-opt no-new-privileges --pids-limit 32 --memory 128m --env-file tests/fixtures/smoke.env "$IMAGE@$DIGEST" --check
           cp .env.example .env
           mkdir -p secrets data
           printf dummy > secrets/npm_secret
           printf dummy > secrets/technitium_token
           SYNC_IMAGE="$IMAGE@$DIGEST" docker compose config --quiet
           SYNC_IMAGE="$IMAGE@$DIGEST" docker compose pull
+          if [ "$PUBLIC_REPOSITORY" = true ]; then
+            anonymous_config="$(mktemp -d)"
+            DOCKER_CONFIG="$anonymous_config" docker pull "$IMAGE@$DIGEST"
+          fi
           printf 'Verified image: `%s@%s`\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"

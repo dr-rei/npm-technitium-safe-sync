@@ -203,7 +203,10 @@ def dns_records(cfg):
             if not isinstance(raw_name, str) or not isinstance(item.get("type"), str) or not isinstance(item.get("rData"), dict) or type(item.get("disabled")) is not bool:
                 raise RuntimeError("Malformed Technitium record fields")
             name = raw_name.rstrip(".").lower()
-            if normalized_name(name.removeprefix("*.")) is None or not (name == zone or name.endswith("." + zone)):
+            # DNS owners (e.g. _acme-challenge TXT and _sip._tcp SRV) are broader
+            # than hostnames. Keep NPM/state validation strict, not the zone listing.
+            labels = name.removeprefix("*.").split(".")
+            if len(name) > 253 or not all(re.fullmatch(r"[a-z0-9_-]{1,63}", label) for label in labels) or not (name == zone or name.endswith("." + zone)):
                 raise RuntimeError("Invalid or out-of-zone Technitium record")
             if name.endswith("." + zone):
                 records.setdefault(name, []).append(item)

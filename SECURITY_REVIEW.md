@@ -17,9 +17,11 @@ Review date: 2026-11-11. Scope: original `npm_technitium_safe_sync.zip` from the
 | Heartbeat excluded dry-run and had no container healthcheck | A healthy dry-run could appear stale; failures lacked health feedback | Successful-cycle heartbeat in both modes, stale/missing health tests, Docker healthcheck |
 | Local-only Compose and floating image/action inputs | No reproducible distribution or deployment pin | Image-only Compose, pinned base digest and action SHAs, least-privilege Actions, two-platform publishing with tested digest |
 
+Additional compatibility repair: zone snapshot validation permits underscore DNS owners such as `_acme-challenge` TXT and `_sip._tcp` SRV while keeping strict hostname validation for NPM/owned A names. A local HTTP regression verifies unrelated service records are preserved.
+
 ## Verification
 
-26 unit and local HTTP integration tests passed under Linux Python 3.14.4 before initial publication. Fixtures cover actual request serialization, both Technitium auth modes, add/update/delete, dry-run, restart/state reload, malformed APIs, manual comment changes, redirects, fresh-read conflict, process lock and health. CI repeats these tests on the actual Python 3.12 image, checks hardened startup, nonroot permissions, missing credentials, Compose validation and published-digest pull. Consult the release evidence and workflow for the actual CI result; prepared checks are not evidence that they ran.
+29 unit and local HTTP integration tests passed under Linux Python 3.14.4 before initial publication. Fixtures cover actual request serialization, both Technitium auth modes, add/update/delete, dry-run, restart/state reload, malformed APIs, manual comment changes, redirects, fresh-read conflict, process lock and health. CI repeats these tests on the actual Python 3.12 image, checks hardened startup, nonroot permissions, missing credentials, Compose validation and published-digest pull. Consult the release evidence and workflow for the actual CI result; prepared checks are not evidence that they ran.
 
 ## Residual limits and required staging
 

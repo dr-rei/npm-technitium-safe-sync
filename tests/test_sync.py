@@ -110,6 +110,25 @@ class Tests(unittest.TestCase):
             self.assertEqual(r['conflicts'], 1)
             tech.assert_not_called()
 
+    def test_deletion_cap_blocks_entire_batch(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = cfg(pathlib.Path(d) / 'state.json', deletions=True)
+            conf['max_deletes'] = 0
+            state = {'version': 1, 'owned': {'erp.apps.example.com': '192.0.2.20'},
+                     'stale_since': {'erp.apps.example.com': 1}}
+            with patch.object(sync, 'tech_call') as tech:
+                result = sync.reconcile(conf, set(), {}, state, now=90000)
+            self.assertEqual(result['deleted'], 0)
+            self.assertIn('erp.apps.example.com', state['owned'])
+            tech.assert_not_called()
+
+    def test_empty_npm_fails_closed_by_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = cfg(pathlib.Path(d) / 'state.json')
+            with patch.object(sync, 'api', side_effect=[{'token': 'dummy'}, []]):
+                with self.assertRaises(RuntimeError):
+                    sync.npm_hosts(conf)
+
 
 if __name__ == '__main__':
     unittest.main()
