@@ -25,7 +25,8 @@ jobs:
           docker build -t sync:test .
           docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 256m -v "$PWD/tests:/tests:ro" --entrypoint python sync:test -m unittest discover -s /tests -v
           sh tests/container-smoke.sh sync:test
-          sh tests/quickstart-smoke.sh sync:test
+          # Also upgrade from the published release pinned in the quickstart template.
+          sh tests/quickstart-smoke.sh sync:test "$(sed -n 's/^SYNC_IMAGE=//p' .env.quickstart.example)"
           # Exercise the exact public image used by the README as well as the candidate.
           sh tests/quickstart-smoke.sh "$(sed -n 's/^SYNC_IMAGE=//p' .env.quickstart.example)"
       - name: Validate deployment configuration and image pin

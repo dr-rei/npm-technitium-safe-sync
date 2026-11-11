@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- CI now upgrades from the published release pinned in the quickstart template to each candidate image on the same named volume and requires the previous release's state to survive.
+- Document the update, rollback, backup and restore steps, and which Docker commands keep or destroy the state volume. Restore writes state as the service user so it stays writable.
+
 ## 1.0.3
 
 - Fix updates and deletions of records that clients query: Technitium rewrites `lastUsedOn` on every answer, so the pre-write reread aborted the cycle. The reread now ignores only that field; real 15.6.2 CI queries records between snapshot and reread.

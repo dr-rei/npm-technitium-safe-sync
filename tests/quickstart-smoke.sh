@@ -2,6 +2,8 @@
 # Exercise exactly the two fresh-install files, with dummy local-only endpoints.
 set -eu
 image="${1:?test image required}"
+# Optional previously released image: its state must survive upgrading to $image.
+previous="${2:-}"
 project="sync-quickstart-ci-${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT:-1}"
 fixture="$(mktemp -d)"
 export QUICKSTART_LITERAL=SHOULD_NOT_EXPAND
@@ -70,4 +72,23 @@ from pathlib import Path
 import sync
 assert sync.state_load(Path("/data/state.json"))["owned"] == {"app.apps.example.com": "192.0.2.20"}
 '
+if [ -n "$previous" ]; then
+  # Documented upgrade: the previous release owns state, then only SYNC_IMAGE changes.
+  compose down
+  SYNC_IMAGE="$previous" compose run --rm --no-deps --entrypoint python npm-technitium-safe-sync -c '
+from pathlib import Path
+import sync
+state = {"version": 1, "owned": {"old.apps.example.com": "192.0.2.30"}, "stale_since": {}}
+sync.state_save(Path("/data/state.json"), state)
+'
+  compose up -d --force-recreate
+  [ "$(docker inspect --format '{{.Config.Image}}' "$(compose ps -q npm-technitium-safe-sync)")" = "$image" ]
+  compose stop
+  compose run --rm --no-deps --entrypoint python npm-technitium-safe-sync -c '
+from pathlib import Path
+import sync
+assert sync.state_load(Path("/data/state.json"))["owned"] == {"old.apps.example.com": "192.0.2.30"}
+'
+  echo 'PASS: state written by the previous release survives the image upgrade'
+fi
 echo 'PASS: two-file startup, required credentials, literal secrets, nonroot volume initialization and persistent state'

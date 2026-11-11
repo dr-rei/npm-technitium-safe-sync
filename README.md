@@ -325,19 +325,67 @@ in zones you remove from `DNS_ZONES` are kept and must be cleaned up by hand.
 
 ### State, updates and backups
 
-The named volume is `npm-technitium-safe-sync_sync_data` under the preset's
-fixed project name. This preset represents one deployment per Docker host: a
-second directory using the same project name manages the same service and volume.
-Docker creates the volume automatically; ordinary container recreation and
-`docker compose down` preserve it. **Do not run `docker compose down -v`, remove
-or prune this volume, change the project name, or launch a second deployment
-against the same zones.** Losing ownership state causes existing records to be
-preserved as conflicts rather than automatically adopted.
+#### Where your data lives
 
-Before updating, stop the synchronizer and back up both state and Technitium
-zones. One state-backup method, while the service container still exists, is:
+Everything the service must remember is in one Docker volume,
+`npm-technitium-safe-sync_sync_data`, mounted at `/data`. The most important file
+is `state.json`: the list of DNS records **this tool created**. Without it, the
+tool treats its own earlier records as manual DNS and leaves them alone (logged
+as `SKIP unmanaged existing DNS name`) instead of updating or deleting them.
+Your settings live in `.env` next to `compose.yaml`.
+
+The volume name comes from the fixed `name:` in `compose.yaml`, not the folder
+name, so it stays the same when you update or re-download the files. Run one
+deployment per Docker host.
+
+| Safe: data is kept | Destroys the data |
+| --- | --- |
+| `docker compose up -d --force-recreate`, `pull`, `restart`, `stop`/`start` | `docker compose down -v` (or `--volumes`) |
+| `docker compose down` followed by `up -d` | `docker volume rm` of this volume |
+| Updating or rolling back the image | `docker volume prune` or `docker system prune --volumes` **while the service is down** |
+| Editing `.env`, re-downloading `compose.yaml` | Changing `name:` in `compose.yaml` |
+| Host reboot (the service restarts by itself) | Moving to a new host without restoring a backup |
+
+Recreation, `down`/`up`, an `.env` change, an upgrade from 1.0.2 to 1.0.3 and a
+rollback were tested against real NPM and Technitium: no records were re-added,
+lost or turned into conflicts. CI repeats the upgrade check for every release.
+
+#### Update to a new version
+
+1. Open the new [GitHub release](https://github.com/dr-rei/npm-technitium-safe-sync/releases)
+   and copy its **Immutable production pin** (`docker.io/drreilab/npm-technitium-safe-sync@sha256:…`).
+   Read its notes for any special upgrade steps.
+2. Optionally back up first (see below).
+3. Update, replacing `NEW_IMAGE` with the copied value:
 
 ```sh
+cd ~/npm-technitium-safe-sync
+sed -i 's|^SYNC_IMAGE=.*|SYNC_IMAGE=NEW_IMAGE|' .env
+docker compose pull
+docker compose up -d --force-recreate
+docker compose logs --tail=50 npm-technitium-safe-sync
+```
+
+4. Confirm a new `Cycle completed` line. If nothing changed in NPM, expect
+   `"added": 0` and `"conflicts": 0`, which shows the existing records are still
+   owned.
+
+Only `SYNC_IMAGE` changes; `.env` settings and the state volume carry over. A
+version tag such as `docker.io/drreilab/npm-technitium-safe-sync:1.0.3` also
+works and is easier to read; the digest guarantees the exact verified image.
+Avoid `latest` in production, because it changes without you choosing to update.
+
+**Roll back** the same way using the previous release's image. All 1.0.x
+releases use the same state format (version 1); rolling back from 1.0.3 to 1.0.2
+was tested. A rollback does not undo DNS changes already made.
+
+#### Back up and restore
+
+Back up the state together with a Technitium backup, so both describe the same
+moment:
+
+```sh
+cd ~/npm-technitium-safe-sync
 docker compose stop
 backup_dir="state-backup-$(date +%Y%m%d-%H%M%S)"
 mkdir -m 700 "$backup_dir"
@@ -345,16 +393,28 @@ docker compose cp npm-technitium-safe-sync:/data/. "$backup_dir/"
 docker compose start
 ```
 
-Update only `SYNC_IMAGE` to the next verified release digest, then use
-`docker compose pull` and `docker compose up -d --force-recreate`. Preserve `.env`
-and state; keep deletions off during upgrade validation. Rolling back the image
-does not undo DNS changes. Review coordinated state/zone backups before restoring.
+Restore (for example on a new host, after creating `compose.yaml` and `.env` and
+running `docker compose up -d` once):
+
+```sh
+cd ~/npm-technitium-safe-sync
+docker compose stop
+docker compose run --rm -T --no-deps --entrypoint sh npm-technitium-safe-sync -c 'cat > /data/state.json' < state-backup-YYYYMMDD-HHMMSS/state.json
+docker compose start
+```
+
+This writes the file as the service's own user, so it stays writable. Do not
+restore with `docker compose cp` into the container: copied files belong to root
+and the service could no longer update them. Restore DNS and state from the same
+backup; a state file that does not match the zone shows up as conflicts.
 
 **Already deployed with `./data` and file secrets?** Keep the existing
-`compose.yaml`, `.env`, `data/` and `secrets/` setup. It remains supported. Update
-its image pin only; do not switch to the quickstart named volume without a
-planned, stopped-service state migration. The two presets are alternatives,
-not Compose files to merge.
+`compose.yaml`, `.env`, `data/` and `secrets/` setup. It remains supported. Its
+state is the `data/` folder: update with the same `sed`, `pull` and `up -d
+--force-recreate` steps, and back up with `sudo cp -a data <backup-folder>` while the
+service is stopped (`-a` keeps the UID 10001 ownership). Do not switch to the quickstart named volume without a planned,
+stopped-service state migration. The two presets are alternatives, not Compose
+files to merge.
 
 ## Existing deployment / file-secret preset
 
@@ -422,7 +482,7 @@ When upgrading from 1.0.0, first disable deletions and back up zone + state. The
 
 ## Version pinning, updates and rollback
 
-Production should set `SYNC_IMAGE=ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<verified-index-digest>` in `.env`. The release evidence includes an actual digest after publication. Version tag `:1.0.3` is readable but tags can be moved; a digest pins exact image content. `:main` tracks development and is not a production pin. GHCR has no floating `latest` tag; Docker Hub `latest` follows the GitHub Latest stable release.
+Production should set `SYNC_IMAGE=ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<verified-index-digest>` in `.env`. The release evidence includes an actual digest after publication. Version tag `:1.0.3` is readable and is never intentionally re-pushed; a digest pins exact image content. `:main` tracks development and is not a production pin. GHCR has no floating `latest` tag; Docker Hub `latest` follows the GitHub Latest stable release.
 
 The workflow builds `linux/amd64` and `linux/arm64`. Main pushes publish `:main` to GHCR only. Version tags publish `:MAJOR.MINOR.PATCH` to both enabled registries; Docker Hub `latest` follows GitHub Latest. No new commit-hash tags are created. Docker Hub shows only `latest` and numbered releases. Use a digest for immutability. Releases must use new version numbers; never retag an existing release.
 
