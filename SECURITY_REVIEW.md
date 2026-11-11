@@ -21,7 +21,7 @@ Additional compatibility repair: zone snapshot validation permits underscore DNS
 
 ## Verification
 
-30 unit and local HTTP integration tests passed under Linux Python 3.14.4 before initial publication. Fixtures cover actual request serialization, both Technitium auth modes, add/update/delete, dry-run, restart/state reload, malformed APIs, manual comment changes, redirects, fresh-read conflict, process lock and health. CI repeats these tests on the actual Python 3.12 image, checks hardened startup, nonroot permissions, missing credentials, Compose validation and published-digest pull. Consult the release evidence and workflow for the actual CI result; prepared checks are not evidence that they ran.
+The initial release had 30 passing unit and local HTTP integration tests. The 1.0.1 follow-up has 35 passing tests under bounded offline Linux Python 3.14.4, including the full-audit regressions. Fixtures cover actual request serialization, both Technitium auth modes, add/update/delete, dry-run, restart/state reload, malformed APIs, manual comment changes, redirects, fresh-read conflict, process lock and health. CI repeats these tests on the actual Python 3.12 image, checks hardened startup, nonroot permissions, missing credentials, Compose validation and published-digest pull. Consult the release evidence and workflow for the actual CI result; prepared checks are not evidence that they ran.
 
 ## Residual limits and required staging
 
@@ -34,4 +34,4 @@ Additional compatibility repair: zone snapshot validation permits underscore DNS
 - The healthcheck measures cycle freshness, not application reachability or successful DNS resolution. Conflicts require monitoring and operator action.
 - Pinning does not deliver future base-image security updates automatically. Review Dependabot updates and perform appropriate vulnerability scanning as part of ongoing maintenance.
 
-No prior independent audit record was supplied. Coverage is limited to this source package and its distribution workflow; unrelated GitHub account settings and existing live infrastructure were outside scope.
+The initial review was followed by a full independent source/local audit of v1.0.0. That audit found two operational correctness defects, repaired in 1.0.1 and summarized in AUDIT_REMEDIATION.md. It established no exploitable security vulnerability within its source scope; this is not a compliance certification or a CVE-free claim. Live infrastructure and effective hosted policy remain outside source-only evidence.

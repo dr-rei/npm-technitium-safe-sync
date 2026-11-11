@@ -208,8 +208,7 @@ def dns_records(cfg):
             labels = name.removeprefix("*.").split(".")
             if len(name) > 253 or not all(re.fullmatch(r"[a-z0-9_-]{1,63}", label) for label in labels) or not (name == zone or name.endswith("." + zone)):
                 raise RuntimeError("Invalid or out-of-zone Technitium record")
-            if name.endswith("." + zone):
-                records.setdefault(name, []).append(item)
+            records.setdefault(name, []).append(item)
     return records
 
 
@@ -252,17 +251,30 @@ def state_save(path, state):
     os.replace(tmp, path)
 
 
+def has_blocking_ancestor(domain, zone, snapshot):
+    """Apex NS is normal authority; apex aliases still block descendant writes."""
+    labels = domain.split(".")
+    for i in range(1, len(labels)):
+        parent = ".".join(labels[i:])
+        for record in snapshot.get(parent, []):
+            kind = record.get("type")
+            if kind in ("DNAME", "CNAME") or (kind == "NS" and parent != zone):
+                return True
+        if parent == zone:
+            break
+    return False
+
+
 def check_unchanged(cfg, domain, expected):
     """Reduce the read/write race; the upstream API has no conditional-write contract."""
     fresh = dns_records(cfg)
     if fresh.get(domain, []) != expected:
         raise RuntimeError("DNS changed during reconciliation; refusing this write")
     zone = zone_for(domain, cfg["zones"])
-    labels = domain.split(".")
-    for i in range(1, len(labels)):
-        parent = ".".join(labels[i:])
-        if parent != zone and any(r.get("type") in ("NS", "DNAME", "CNAME") for r in fresh.get(parent, [])):
-            raise RuntimeError("DNS delegation or alias blocks this write")
+    if zone is None:
+        raise RuntimeError("DNS name outside permitted zones")
+    if has_blocking_ancestor(domain, zone, fresh):
+        raise RuntimeError("DNS delegation or alias blocks this write")
 
 
 def reconcile(cfg, desired, snapshot, state, now=None):
@@ -273,19 +285,24 @@ def reconcile(cfg, desired, snapshot, state, now=None):
         if not cfg["dry_run"]:
             state_save(cfg["state_path"], state)
 
+    # Validated source presence ends absence, even when DNS conflicts or later
+    # writes fail. Persist this before mutations so a restart cannot revive it.
+    reset_stale = any(domain in state["stale_since"] for domain in desired)
+    for domain in desired:
+        state["stale_since"].pop(domain, None)
+    if reset_stale:
+        commit()
+
     for domain in sorted(desired):
         zone = zone_for(domain, cfg["zones"])
         if zone is None:
             raise RuntimeError("Desired name outside permitted zones")
-        labels = domain.split(".")
-        ancestors = [".".join(labels[i:]) for i in range(1, len(labels))]
-        if any(r.get("type") in ("NS", "DNAME", "CNAME") for parent in ancestors if parent != zone for r in snapshot.get(parent, [])):
+        if has_blocking_ancestor(domain, zone, snapshot):
             changes["conflicts"] += 1
             LOG.warning("SKIP name below delegation or alias: %s", domain)
             continue
         existing = snapshot.get(domain, [])
         owned_ip = state["owned"].get(domain)
-        state["stale_since"].pop(domain, None)
         if owned_ip is None:
             if existing:
                 changes["conflicts"] += 1

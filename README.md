@@ -72,15 +72,21 @@ NPM uses `POST /api/tokens` then `GET /api/nginx/proxy-hosts` with a bearer toke
 
 Use trusted HTTPS certificates, final URLs without redirects, and firewalls limiting management-port access. HTTP requires `ALLOW_INSECURE_HTTP=true` and sends credentials in plaintext. For a private CA, mount a CA bundle read-only and set `SSL_CERT_FILE` to its container path; do not disable TLS verification. Ambient HTTP proxy variables are intentionally ignored. When using host management endpoints from Docker, `localhost` refers to this new container; use reachable host/IP addresses or appropriate Docker networks.
 
+## Audit repairs in 1.0.1
+
+Version 1.0.1 repairs the two operational defects identified in the full v1.0.0 audit: source reappearance now durably clears an old deletion timer before DNS conflicts/writes, and both initial and fresh-read guards now detect zone-apex DNAME/CNAME aliases while allowing ordinary apex NS/SOA records. See [AUDIT_REMEDIATION.md](AUDIT_REMEDIATION.md) for the regression cases and remaining production acceptance gates.
+
+When upgrading from 1.0.0, first disable deletions and back up zone + state. The fix cannot reconstruct presence history missed by the old version. Treat old pending removals conservatively: observe successful upgraded polls throughout at least DELETE_GRACE_SECONDS with deletion disabled before considering re-enabling it. Review pending removals and staging results first. State format and record ownership marker remain compatible.
+
 ## Version pinning, updates and rollback
 
-Production should set `SYNC_IMAGE=ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<verified-index-digest>` in `.env`. The release evidence includes an actual digest after publication. Version tag `:1.0.0` is readable but tags can be moved; a digest pins exact image content. `:main` tracks development and is not a production pin. No floating `latest` tag is published.
+Production should set `SYNC_IMAGE=ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<verified-index-digest>` in `.env`. The release evidence includes an actual digest after publication. Version tag `:1.0.1` is readable but tags can be moved; a digest pins exact image content. `:main` tracks development and is not a production pin. No floating `latest` tag is published.
 
 The workflow builds `linux/amd64` and `linux/arm64`, publishes `:main` for main pushes, `:MAJOR.MINOR.PATCH` for `vMAJOR.MINOR.PATCH` tags, plus full `:sha-<commit>` tags. SHA tags may refer to the most recent build for that commit (e.g. main versus a release); use a digest for immutability. Releases must use new version numbers; never retag an existing release.
 
 ```sh
 # Verify the selected version, copy its digest into .env, then pull it.
-docker buildx imagetools inspect ghcr.io/dr-rei/npm-technitium-safe-sync:1.0.0
+docker buildx imagetools inspect ghcr.io/dr-rei/npm-technitium-safe-sync:1.0.1
 docker compose pull
 docker compose up -d --force-recreate
 ```

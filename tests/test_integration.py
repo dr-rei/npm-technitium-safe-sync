@@ -139,6 +139,100 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(sync.run_once(self.conf)["added"], 1)
         self.assertEqual(self.records[:2], manual)
 
+    def test_blocked_return_resets_delete_grace_timer(self):
+        for blocker in ("NS", "DNAME", "CNAME"):
+            with self.subTest(blocker=blocker):
+                self.conf["state_path"].unlink(missing_ok=True)
+                self.records = []
+                self.writes.clear()
+                self.conf.update(deletions=True, delete_grace=300, allow_empty=False)
+                self.hosts = [{"enabled": True, "domain_names": ["app.branch.apps.example.com", "other.apps.example.com"]}]
+                with patch.object(sync.time, "time", return_value=1):
+                    sync.run_once(self.conf)
+                self.hosts[0]["domain_names"] = ["other.apps.example.com"]
+                with patch.object(sync.time, "time", return_value=1):
+                    self.assertEqual(sync.run_once(self.conf)["pending"], 1)
+                self.assertEqual(sync.state_load(self.conf["state_path"])["stale_since"]["app.branch.apps.example.com"], 1)
+
+                self.hosts[0]["domain_names"] = ["app.branch.apps.example.com", "other.apps.example.com"]
+                self.records.append({"name": "branch.apps.example.com", "type": blocker, "disabled": False,
+                                     "rData": {"nameServer": "ns.example.net"}})
+                with patch.object(sync.time, "time", return_value=100000):
+                    result = sync.run_once(self.conf)
+                self.assertEqual(result["conflicts"], 1)
+                self.assertNotIn("app.branch.apps.example.com", sync.state_load(self.conf["state_path"])["stale_since"])
+
+                self.hosts[0]["domain_names"] = ["other.apps.example.com"]
+                self.records = [r for r in self.records if r["name"] != "branch.apps.example.com"]
+                with patch.object(sync.time, "time", return_value=100001):
+                    result = sync.run_once(self.conf)
+                self.assertEqual(result["pending"], 1)
+                self.assertEqual(sync.state_load(self.conf["state_path"])["stale_since"]["app.branch.apps.example.com"], 100001)
+                self.assertEqual([w for w in self.writes if w[0].endswith("/delete")], [])
+
+                with patch.object(sync.time, "time", return_value=100001 + 299):
+                    self.assertEqual(sync.run_once(self.conf)["deleted"], 0)
+                with patch.object(sync.time, "time", return_value=100001 + 300):
+                    self.assertEqual(sync.run_once(self.conf)["deleted"], 1)
+                deletes = [w for w in self.writes if w[0].endswith("/delete")]
+                self.assertEqual([w[1]["domain"] for w in deletes], ["app.branch.apps.example.com"])
+
+    def test_apex_dname_and_cname_guard_children(self):
+        for record_type in ("DNAME", "CNAME"):
+            with self.subTest(record_type=record_type):
+                self.records = [{"name": "apps.example.com", "type": record_type,
+                                 "disabled": False, "rData": {"target": "alias.example.net"}}]
+                self.writes.clear()
+                self.conf["dry_run"] = True
+                self.assertEqual(sync.run_once(self.conf)["conflicts"], 1)
+                self.assertEqual(self.writes, [])
+                self.conf["dry_run"] = False
+                self.assertEqual(sync.run_once(self.conf)["conflicts"], 1)
+                self.assertEqual(self.writes, [])
+
+    def test_apex_alias_added_on_final_reread_refuses_write(self):
+        for record_type in ("DNAME", "CNAME"):
+            with self.subTest(record_type=record_type):
+                self.conf["state_path"].unlink(missing_ok=True)
+                self.records = []
+                self.writes.clear()
+                before = {}
+                after = {"apps.example.com": [{"name": "apps.example.com", "type": record_type,
+                                                "disabled": False, "rData": {"target": "elsewhere.example.net"}}]}
+                with patch.object(sync, "dns_records", side_effect=[before, after]):
+                    with self.assertRaises(RuntimeError):
+                        sync.run_once(self.conf)
+                self.assertEqual(self.writes, [])
+
+    def test_normal_apex_soa_and_ns_allow_child_add(self):
+        self.records = [{"name": "apps.example.com", "type": "SOA", "disabled": False, "rData": {}},
+                        {"name": "apps.example.com", "type": "NS", "disabled": False, "rData": {}}]
+        apex = copy.deepcopy(self.records)
+        self.assertEqual(sync.run_once(self.conf)["added"], 1)
+        self.assertEqual(self.records[:2], apex)
+        self.assertEqual(len([r for r in self.records if r["name"] == "app.apps.example.com"]), 1)
+
+    def test_returning_name_timer_reset_persists_before_later_write_failure(self):
+        self.conf.update(deletions=True, delete_grace=300, allow_empty=False)
+        sync.run_once(self.conf)
+        state = sync.state_load(self.conf["state_path"])
+        state["stale_since"]["app.apps.example.com"] = 1
+        sync.state_save(self.conf["state_path"], state)
+        self.hosts = [{"enabled": True,
+                       "domain_names": ["aaa.apps.example.com", "app.apps.example.com"]}]
+        original_tech_call = sync.tech_call
+
+        def fail_new_add(cfg, path, params, write=False):
+            if path.endswith("/add"):
+                raise RuntimeError("simulated add failure")
+            return original_tech_call(cfg, path, params, write=write)
+
+        with patch.object(sync, "tech_call", side_effect=fail_new_add):
+            with self.assertRaisesRegex(RuntimeError, "simulated add failure"):
+                sync.run_once(self.conf)
+        self.assertNotIn("app.apps.example.com",
+                         sync.state_load(self.conf["state_path"])["stale_since"])
+
     def test_malformed_source_never_writes_or_deletes(self):
         sync.run_once(self.conf)
         self.writes.clear()
