@@ -193,10 +193,23 @@ def exercise(mode, npm_admin, dns_admin):
     check(keep_proxy["id"] != proxy["id"], mode + ": independent active source host exercised")
 
 
+def https_answer(domain):
+    """(authoritative flag, advertises h3) for an HTTPS (type 65) query."""
+    labels = b"".join(bytes([len(label)]) + label.encode() for label in domain.split(".")) + b"\0"
+    packet = struct.pack("!6H", 4242, 0x0100, 1, 0, 0, 0) + labels + struct.pack("!HH", 65, 1)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(5)
+        sock.sendto(packet, ("dns", 53))
+        data = sock.recv(65535)
+    flags, answers = struct.unpack("!H", data[2:4])[0], struct.unpack("!H", data[6:8])[0]
+    return bool(flags & 0x0400) and answers == 1, b"\x02h3" in data
+
+
 def exercise_forwarder(npm_admin, dns_admin):
-    """Split DNS: local overrides inside a conditional-forwarder zone."""
+    """Split DNS: local overrides in a conditional-forwarder zone with a nested zone."""
     zone = "fwd.sync.example.test"
-    app, nested = "app." + zone, "app.branch." + zone
+    child = "internal." + zone
+    app, nested, inner = "app." + zone, "app.branch." + zone, "db." + child
     reader = "reader-forwarder"
     def admin_dns(path, data):
         return request(DNS, path, data, dns_admin, form=True)
@@ -204,9 +217,11 @@ def exercise_forwarder(npm_admin, dns_admin):
     admin_dns("/api/zones/create", {"zone": zone, "type": "Forwarder", "forwarder": "192.0.2.53", "protocol": "Udp"})
     admin_dns("/api/zones/records/add", {"zone": zone, "domain": "branch." + zone, "type": "FWD",
                                          "forwarder": "192.0.2.54", "protocol": "Udp"})
+    admin_dns("/api/zones/create", {"zone": child, "type": "Primary"})  # Separate nested zone.
     admin_dns("/api/admin/users/create", {"user": reader, "pass": PASSWORD, "displayName": "CI forwarder reader"})
-    admin_dns("/api/zones/permissions/set", {"zone": zone,
-              "userPermissions": "admin|true|true|true|" + reader + "|true|true|true"})
+    for name in (zone, child):
+        admin_dns("/api/zones/permissions/set", {"zone": name,
+                  "userPermissions": "admin|true|true|true|" + reader + "|true|true|true"})
     token = request(DNS, "/api/user/createToken", {"user": reader, "pass": PASSWORD, "tokenName": "ci-fwd"}, form=True)["token"]
     conf = dict(npm_url=NPM, npm_identity=READER_EMAIL, npm_secret=PASSWORD, dns_url=DNS, dns_token=token,
                 tech_auth="bearer", ip=socket.gethostbyname("npm"), zones=(zone,), interval=300, ttl=120,
@@ -214,26 +229,57 @@ def exercise_forwarder(npm_admin, dns_admin):
                 state_path=Path("/data/forwarder/state.json"))
     conf["state_path"].parent.mkdir(parents=True)
     proxy = request(NPM, "/api/nginx/proxy-hosts", {
-        "domain_names": [app, nested], "forward_scheme": "http", "forward_host": "backend",
+        "domain_names": [app, nested, inner, child], "forward_scheme": "http", "forward_host": "backend",
         "forward_port": 8080, "certificate_id": 0, "access_list_id": 0}, npm_admin)
     apex = sync.stable_records([r for r in sync.dns_records(conf)[zone] if r["type"] == "FWD"])
+
+    # Nested zone not yet in DNS_ZONES: Technitium rejects that one name; the cycle continues.
     result = sync.run_once(conf)
-    check(result["added"] == 1 and result["conflicts"] == 1,
-          "forwarder: create local override; refuse name below subtree FWD")
-    check(dns_answers(app) == [conf["ip"]], "forwarder: authoritative local A answer")
+    # Technitium rejects names inside the nested zone but stores the nested zone's own
+    # name in the parent, where the nested zone shadows it (verified on 15.6.2).
+    owned = sync.state_load(conf["state_path"])["owned"]
+    check(result["added"] == 2 and result["conflicts"] == 2 and inner not in owned and child in owned,
+          "forwarder: name inside an unlisted nested zone is skipped, cycle completes, subtree FWD refused")
+    types = {r["type"] for r in sync.dns_records(conf)[app]}
+    check(types == {"A", "HTTPS"} and dns_answers(app) == [conf["ip"]],
+          "forwarder: local A override plus HTTPS companion")
+    check(https_answer(app) == (True, False), "forwarder: HTTPS query answered locally without HTTP/3")
+    conf["zones"] = (zone, child)
+    result = sync.run_once(conf)
+    check(result["added"] == 1 and result["conflicts"] == 2 and result["pending"] == 0
+          and inner in sync.dns_records(conf, (child,)) and dns_answers(inner) == [conf["ip"]]
+          and child not in sync.state_load(conf["state_path"])["owned"],
+          "forwarder: nested zone in DNS_ZONES receives its names; its apex stops being managed")
+    check({r["type"] for r in sync.dns_records(conf, (child,))[inner]} == {"A"},
+          "forwarder: Primary nested zone gets no HTTPS companion")
+
     conf["ip"] = "192.0.2.31"
-    check(sync.run_once(conf)["updated"] == 1 and dns_answers(app) == ["192.0.2.31"],
-          "forwarder: IP update through actual API")
+    check(sync.run_once(conf)["updated"] == 2 and dns_answers(app) == ["192.0.2.31"] and dns_answers(inner) == ["192.0.2.31"],
+          "forwarder: IP update in parent and nested zones; companion kept")
+    # Operator deletes managed records by hand: conflict until explicitly released.
+    for record in sync.dns_records(conf)[app]:
+        data = {"zone": zone, "domain": app, "type": record["type"]}
+        data.update({"ipAddress": record["rData"]["ipAddress"]} if record["type"] == "A" else
+                    {"svcPriority": "1", "svcTargetName": ".", "svcParams": "alpn|h2,http/1.1"})
+        admin_dns("/api/zones/records/delete", data)
+    check(sync.run_once(conf)["conflicts"] == 2, "forwarder: hand-deleted managed record is a conflict")
+    check(sync.admin(conf, ["--forget-missing"]) == 0 and app not in sync.state_load(conf["state_path"])["owned"]
+          and inner in sync.state_load(conf["state_path"])["owned"], "admin: --forget-missing releases only missing names")
+    check(sync.run_once(conf)["added"] == 1 and {r["type"] for r in sync.dns_records(conf)[app]} == {"A", "HTTPS"},
+          "admin: released name is recreated with its HTTPS companion")
     request(NPM, "/api/nginx/proxy-hosts/" + str(proxy["id"]) + "/disable", {}, npm_admin)
-    check(sync.run_once(conf)["pending"] == 1, "forwarder: removed host starts grace")
+    check(sync.run_once(conf)["pending"] == 2, "forwarder: removed hosts start grace")
     state = sync.state_load(conf["state_path"])
-    state["stale_since"][app] = int(time.time()) - 301
+    for name in state["owned"]:
+        state["stale_since"][name] = int(time.time()) - 301
     sync.state_save(conf["state_path"], state)
-    check(sync.run_once(conf)["deleted"] == 1, "forwarder: grace deletion through actual API")
-    # After deletion the name is forwarded again (to the unreachable upstream), so check via the API.
+    check(sync.run_once(conf)["deleted"] == 2 and not sync.state_load(conf["state_path"])["owned"],
+          "forwarder: grace deletion of A and HTTPS records")
+    # Deleted names are forwarded again (to the unreachable upstream), so check via the API.
     snapshot = sync.dns_records(conf)
-    check(app not in snapshot and sync.stable_records([r for r in snapshot[zone] if r["type"] == "FWD"]) == apex,
-          "forwarder: override removed, apex forwarding rule untouched")
+    check(app not in snapshot and inner not in snapshot
+          and sync.stable_records([r for r in snapshot[zone] if r["type"] == "FWD"]) == apex,
+          "forwarder: overrides removed, apex forwarding rule untouched")
 
 
 def main():

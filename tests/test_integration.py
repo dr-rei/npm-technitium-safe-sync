@@ -29,6 +29,7 @@ class IntegrationTests(unittest.TestCase):
         self.requests = []
         self.queried = False
         self.zone_type = "Primary"
+        self.reject = {}  # domain -> Technitium response for that write
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -79,17 +80,28 @@ class IntegrationTests(unittest.TestCase):
                                  if callable(fixture.zone_type) else fixture.zone_type},
                         "records": fixture.records}})
                 fixture.writes.append((self.path, params))
-                if self.path.endswith("/add"):
+                if params.get("domain") in fixture.reject:
+                    return self.respond(fixture.reject[params["domain"]])
+                if self.path.endswith("/add") and params["type"] == "HTTPS":
+                    # Shape returned by real Technitium 15.6.2 for svcTargetName ".".
+                    key, value = params["svcParams"].split("|")
+                    fixture.records.append({"name": params["domain"], "type": "HTTPS", "disabled": False,
+                                            "comments": params["comments"], "ttl": int(params["ttl"]),
+                                            "rData": {"svcPriority": int(params["svcPriority"]),
+                                                      "svcTargetName": "", "svcParams": {key: value},
+                                                      "autoIpv4Hint": False, "autoIpv6Hint": False}})
+                elif self.path.endswith("/add"):
                     fixture.records.append({"name": params["domain"], "type": "A", "disabled": False,
                                             "comments": params["comments"], "ttl": int(params["ttl"]),
                                             "rData": {"ipAddress": params["ipAddress"]}})
                 elif self.path.endswith("/update"):
-                    record = next(r for r in fixture.records if r["name"] == params["domain"])
+                    record = next(r for r in fixture.records if r["name"] == params["domain"] and r["type"] == "A")
                     fixture.assertEqual(record["rData"]["ipAddress"], params["ipAddress"])
                     record["rData"]["ipAddress"] = params["newIpAddress"]
                     record["ttl"] = int(params["ttl"])
                 elif self.path.endswith("/delete"):
-                    fixture.records[:] = [r for r in fixture.records if r["name"] != params["domain"]]
+                    fixture.records[:] = [r for r in fixture.records
+                                          if not (r["name"] == params["domain"] and r["type"] == params["type"])]
                 else:
                     fixture.fail("Unexpected endpoint")
                 self.respond({"status": "ok"})
@@ -253,7 +265,10 @@ class IntegrationTests(unittest.TestCase):
                 self.hosts = [{"enabled": True, "domain_names": ["app.branch.apps.example.com", "app.apps.example.com"]}]
                 result = sync.run_once(self.conf)
                 self.assertEqual((result["added"], result["conflicts"]), (1, 1))
-                self.assertEqual([w[1]["domain"] for w in self.writes], ["app.apps.example.com"])
+                # Forwarder zones also get the HTTPS companion for the written name.
+                expected = [("app.apps.example.com", "A")] + (
+                    [("app.apps.example.com", "HTTPS")] if zone_type == "Forwarder" else [])
+                self.assertEqual([(w[1]["domain"], w[1]["type"]) for w in self.writes], expected)
 
     def test_subtree_forwarding_added_on_final_reread_refuses_write(self):
         self.zone_type = "Forwarder"
@@ -303,6 +318,240 @@ class IntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "enabled Primary or Forwarder"):
             sync.run_once(self.conf)
         self.assertEqual(self.writes, [])
+
+    CHILD_ZONE_ERROR = {"status": "error", "errorMessage":
+                        "The domain name 'database.internal.apps.example.com' does not belong to the zone: apps.example.com"}
+
+    def test_name_in_separate_child_zone_is_skipped_and_others_continue(self):
+        self.reject = {"database.internal.apps.example.com": self.CHILD_ZONE_ERROR}
+        self.hosts = [{"enabled": True, "domain_names": [
+            "api.apps.example.com", "database.internal.apps.example.com", "wiki.apps.example.com"]}]
+        with self.assertLogs(sync.LOG, "WARNING") as logs:
+            result = sync.run_once(self.conf)
+        self.assertEqual((result["added"], result["conflicts"]), (2, 1))
+        self.assertEqual(sorted(sync.state_load(self.conf["state_path"])["owned"]),
+                         ["api.apps.example.com", "wiki.apps.example.com"])
+        self.assertTrue(any("separate zone" in line for line in logs.output))
+        self.assertTrue((self.conf["state_path"].parent / "last_success").exists())
+        self.assertEqual(sync.run_once(self.conf)["added"], 0)  # Retried each cycle, never owned.
+
+    def test_rejected_update_and_delete_keep_ownership_and_fail_cycle_after_all_names(self):
+        self.hosts = [{"enabled": True, "domain_names": ["app.apps.example.com", "zzz.apps.example.com"]}]
+        sync.run_once(self.conf)
+        self.reject = {"app.apps.example.com": {"status": "error", "errorMessage": "Access was denied."}}
+        self.conf["ip"] = "192.0.2.21"
+        heartbeat = self.conf["state_path"].parent / "last_success"
+        heartbeat.unlink()
+        with self.assertRaisesRegex(RuntimeError, "rejected 1 write"):
+            sync.run_once(self.conf)
+        self.assertFalse(heartbeat.exists())  # Healthcheck reports the problem.
+        self.assertEqual(sync.state_load(self.conf["state_path"])["owned"],
+                         {"app.apps.example.com": "192.0.2.20", "zzz.apps.example.com": "192.0.2.21"})
+        self.conf.update(ip="192.0.2.20", deletions=True, allow_empty=True)
+        self.hosts = []
+        sync.run_once(self.conf)
+        state = sync.state_load(self.conf["state_path"])
+        state["stale_since"]["app.apps.example.com"] = time.time() - 86401
+        sync.state_save(self.conf["state_path"], state)
+        with self.assertLogs(sync.LOG, "WARNING") as logs, self.assertRaisesRegex(RuntimeError, "rejected 1 write"):
+            sync.run_once(self.conf)
+        self.assertIn("app.apps.example.com", sync.state_load(self.conf["state_path"])["owned"])
+        self.assertTrue(any("permissions" in line for line in logs.output))
+        self.assertFalse(any("Access was denied" in line for line in logs.output))  # Remote text never logged.
+
+    def test_invalid_token_on_write_still_aborts_cycle(self):
+        self.reject = {"app.apps.example.com": {"status": "invalid-token"}}
+        with self.assertRaisesRegex(RuntimeError, "invalid-token"):
+            sync.run_once(self.conf)
+
+    def by_type(self, name):
+        return {r["type"]: r for r in self.records if r["name"] == name}
+
+    def test_forwarder_zone_adds_https_companion_without_http3(self):
+        self.zone_type = "Forwarder"
+        self.records = copy.deepcopy(self.FORWARDER_APEX)
+        self.assertEqual(sync.run_once(self.conf)["added"], 1)
+        https = [w[1] for w in self.writes if w[1]["type"] == "HTTPS"]
+        self.assertEqual(len(https), 1)
+        self.assertEqual({k: https[0][k] for k in ("svcPriority", "svcTargetName", "svcParams",
+                                                   "autoIpv4Hint", "autoIpv6Hint", "comments", "overwrite")},
+                         {"svcPriority": "1", "svcTargetName": ".", "svcParams": "alpn|h2,http/1.1",
+                          "autoIpv4Hint": "false", "autoIpv6Hint": "false", "comments": sync.MARKER,
+                          "overwrite": "false"})
+        self.assertEqual(set(self.by_type("app.apps.example.com")), {"A", "HTTPS"})
+        self.writes.clear()
+        self.assertEqual(sync.run_once(self.conf), {"added": 0, "updated": 0, "deleted": 0, "conflicts": 0, "pending": 0})
+        self.assertEqual(self.writes, [])
+
+    def test_primary_zone_never_gets_https_companion(self):
+        self.assertEqual(sync.run_once(self.conf)["added"], 1)
+        self.assertEqual([w[1]["type"] for w in self.writes], ["A"])
+
+    def test_existing_owned_record_gets_companion_once(self):
+        sync.run_once(self.conf)  # Created as plain A (as 1.0.5 did, or in a Primary zone).
+        self.zone_type = "Forwarder"
+        self.writes.clear()
+        self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.assertEqual([w[1]["type"] for w in self.writes], ["HTTPS"])
+        self.writes.clear()
+        self.assertEqual(sync.run_once(self.conf)["updated"], 0)
+        self.assertEqual(self.writes, [])
+
+    def test_dry_run_plans_companion_without_writing(self):
+        sync.run_once(self.conf)
+        self.zone_type, self.conf["dry_run"] = "Forwarder", True
+        self.writes.clear()
+        with self.assertLogs(sync.LOG, "INFO") as logs:
+            self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.assertEqual(self.writes, [])
+        self.assertTrue(any("PLAN ADD app.apps.example.com HTTPS" in line for line in logs.output))
+
+    def test_manual_or_different_https_record_is_a_conflict(self):
+        self.zone_type = "Forwarder"
+        sync.run_once(self.conf)
+        for change in ({"svcParams": {"alpn": "h3,h2"}}, {"comments": "manual"}):
+            with self.subTest(change=change):
+                record = self.by_type("app.apps.example.com")["HTTPS"]
+                original = copy.deepcopy(record)
+                record.update(change) if "comments" in change else record["rData"].update(change)
+                self.writes.clear()
+                self.conf["ip"] = "192.0.2.21"
+                self.assertEqual(sync.run_once(self.conf)["conflicts"], 1)
+                self.assertEqual(self.writes, [])
+                record.clear(); record.update(original)
+                self.conf["ip"] = "192.0.2.20"
+
+    def test_ip_update_keeps_companion_and_deletion_removes_both(self):
+        self.zone_type = "Forwarder"
+        self.records = copy.deepcopy(self.FORWARDER_APEX)
+        sync.run_once(self.conf)
+        companion = copy.deepcopy(self.by_type("app.apps.example.com")["HTTPS"])
+        self.conf["ip"] = "192.0.2.21"
+        self.writes.clear()
+        self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.assertEqual([w[1]["type"] for w in self.writes], ["A"])
+        self.assertEqual(self.by_type("app.apps.example.com")["HTTPS"], companion)
+        self.conf.update(deletions=True, allow_empty=True)
+        self.hosts = []
+        sync.run_once(self.conf)
+        state = sync.state_load(self.conf["state_path"])
+        state["stale_since"]["app.apps.example.com"] = time.time() - 86401
+        sync.state_save(self.conf["state_path"], state)
+        self.writes.clear()
+        self.assertEqual(sync.run_once(self.conf)["deleted"], 1)
+        self.assertEqual([(w[1]["type"], w[1].get("svcParams")) for w in self.writes],
+                         [("HTTPS", "alpn|h2,http/1.1"), ("A", None)])
+        self.assertEqual(self.records, self.FORWARDER_APEX)
+
+    def test_marked_https_without_state_is_never_adopted(self):
+        self.zone_type = "Forwarder"
+        sync.run_once(self.conf)
+        self.conf["state_path"].unlink()
+        self.writes.clear()
+        result = sync.run_once(self.conf)
+        self.assertEqual((result["added"], result["conflicts"]), (0, 1))
+        self.assertEqual(self.writes, [])
+
+    def test_rejected_companion_keeps_a_record_owned_and_retries(self):
+        self.zone_type = "Forwarder"
+        sync.run_once(self.conf)
+        self.records = [r for r in self.records if r["type"] != "HTTPS"]
+        self.reject = {"app.apps.example.com": {"status": "error", "errorMessage": "Access was denied."}}
+        with self.assertRaisesRegex(RuntimeError, "rejected 1 write"):
+            sync.run_once(self.conf)
+        self.assertIn("app.apps.example.com", sync.state_load(self.conf["state_path"])["owned"])
+        self.reject = {}
+        self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.assertIn("HTTPS", self.by_type("app.apps.example.com"))
+
+    def test_forget_missing_recreates_records_deleted_by_hand(self):
+        self.hosts = [{"enabled": True, "domain_names": ["a.apps.example.com", "b.apps.example.com", "c.apps.example.com"]}]
+        self.assertEqual(sync.run_once(self.conf)["added"], 3)
+        # Operator deletes a and b by mistake; c is edited by hand (kept, not "missing").
+        self.records = [r for r in self.records if r["name"] not in ("a.apps.example.com", "b.apps.example.com")]
+        self.records[0]["rData"]["ipAddress"] = "192.0.2.99"
+        result = sync.run_once(self.conf)
+        self.assertEqual((result["added"], result["conflicts"]), (0, 3))
+        self.writes.clear()
+        with self.assertLogs(sync.LOG, "WARNING"):
+            self.assertEqual(sync.admin(self.conf, ["--forget-missing"]), 0)
+        self.assertEqual(self.writes, [])  # Releasing never writes DNS.
+        self.assertEqual(sorted(sync.state_load(self.conf["state_path"])["owned"]), ["c.apps.example.com"])
+        result = sync.run_once(self.conf)
+        self.assertEqual((result["added"], result["conflicts"]), (2, 1))
+        self.assertEqual(sorted(r["name"] for r in self.records if r["type"] == "A"),
+                         ["a.apps.example.com", "b.apps.example.com", "c.apps.example.com"])
+
+    def test_forget_patterns_and_all_release_ownership_only(self):
+        self.hosts = [{"enabled": True, "domain_names": [
+            "portal.apps.example.com", "db.internal.apps.example.com", "x.y.internal.apps.example.com"]}]
+        sync.run_once(self.conf)
+        before = copy.deepcopy(self.records)
+        sync.admin(self.conf, ["--forget", "*.INTERNAL.apps.example.com."])
+        self.assertEqual(sorted(sync.state_load(self.conf["state_path"])["owned"]), ["portal.apps.example.com"])
+        sync.admin(self.conf, ["--forget", "nothing.example.org"])
+        self.assertEqual(len(sync.state_load(self.conf["state_path"])["owned"]), 1)
+        sync.admin(self.conf, ["--forget-all"])
+        self.assertEqual(sync.state_load(self.conf["state_path"])["owned"], {})
+        self.assertEqual(self.records, before)
+        # Existing records are now unmanaged and are never adopted.
+        self.assertEqual(sync.run_once(self.conf)["conflicts"], 3)
+        for bad in (["--forget"], ["--forget", " "], ["--forget-bogus"]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                sync.admin(self.conf, bad)
+
+    def test_list_owned_prints_state(self):
+        sync.run_once(self.conf)
+        with patch("builtins.print") as out:
+            self.assertEqual(sync.admin(self.conf, ["--list-owned"]), 0)
+        self.assertEqual(out.call_args.args[0], "app.apps.example.com A 192.0.2.20")
+
+    def test_cli_reports_usage_missing_setting_and_busy_lock(self):
+        def run(args, env):
+            return subprocess.run([sys.executable, str(Path(sync.__file__))] + args, env=env,
+                                  capture_output=True, text=True, timeout=10)
+        base = {"PATH": os.environ.get("PATH", "")}
+        self.assertIn("--forget-missing", run(["--bogus"], base).stderr)
+        self.assertIn("Missing required setting: NPM_URL", run(["--check"], base).stderr)
+        env = dict(base, NPM_URL="https://npm.example.test", NPM_IDENTITY="r@example.test", NPM_SECRET="dummy-value",
+                   TECHNITIUM_URL="https://dns.example.test", TECHNITIUM_TOKEN="dummy-token", NPM_LAN_IP="192.0.2.20",
+                   DNS_ZONES="apps.example.com", STATE_FILE=str(self.conf["state_path"]))
+        lock_path = self.conf["state_path"].parent / "sync.lock"
+        with lock_path.open("a+") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = run(["--list-owned"], env)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("docker compose stop", result.stderr)
+        self.assertNotIn("dummy-value", result.stderr + result.stdout)
+
+    def test_owned_name_moved_into_listed_nested_zone_is_recreated_there(self):
+        self.hosts = [{"enabled": True, "domain_names": ["db.internal.apps.example.com"]}]
+        sync.run_once(self.conf)  # Created in the parent before the nested zone existed.
+        self.conf["zones"] = ("apps.example.com", "internal.apps.example.com")
+        shadow = {"db.internal.apps.example.com": copy.deepcopy(self.records)}
+        state = sync.state_load(self.conf["state_path"])
+        written = []
+        def fake(config, path, params=None, write=False):
+            written.append((params["zone"], params["domain"]))
+            return {"status": "ok"}
+        with patch.object(sync, "tech_call", side_effect=fake), patch.object(sync, "check_unchanged"),                 self.assertLogs(sync.LOG, "WARNING") as logs:
+            result = sync.reconcile(self.conf, {"db.internal.apps.example.com"}, {}, state, shadowed=shadow)
+        self.assertEqual((result["added"], result["conflicts"]), (1, 0))
+        self.assertEqual(written, [("internal.apps.example.com", "db.internal.apps.example.com")])
+        self.assertTrue(any("Moved db.internal.apps.example.com" in line for line in logs.output))
+        # A shadowed record that is not this tool's (no marker) is never treated as ours.
+        state = {"version": 1, "owned": {"db.internal.apps.example.com": "192.0.2.20"}, "stale_since": {}}
+        shadow["db.internal.apps.example.com"][0]["comments"] = "manual"
+        with patch.object(sync, "tech_call", side_effect=fake):
+            result = sync.reconcile(self.conf, {"db.internal.apps.example.com"}, {}, state, shadowed=shadow)
+        self.assertEqual((result["added"], result["conflicts"]), (0, 1))
+
+    def test_update_plus_companion_counts_once(self):
+        sync.run_once(self.conf)
+        self.zone_type = "Forwarder"
+        self.conf["ip"] = "192.0.2.21"
+        self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.assertEqual(set(self.by_type("app.apps.example.com")), {"A", "HTTPS"})
 
     def test_normal_apex_soa_and_ns_allow_child_add(self):
         self.records = [{"name": "apps.example.com", "type": "SOA", "disabled": False, "rData": {}},

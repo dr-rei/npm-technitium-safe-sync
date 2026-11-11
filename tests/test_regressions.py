@@ -57,11 +57,15 @@ class RegressionTests(unittest.TestCase):
                 NPM_URL="http://npm.internal", ALLOW_INSECURE_HTTP="true"), clear=True):
             self.assertEqual(sync.validate_config()["npm_url"], "http://npm.internal")
 
-    def test_config_rejects_overlapping_zones_and_empty_credentials(self):
+    def test_config_accepts_nested_zones_but_rejects_repeats_and_empty_credentials(self):
         with patch.dict(os.environ, self._base_environment(
-                DNS_ZONES="example.com,apps.example.com"), clear=True):
-            with self.assertRaises(ValueError):
-                sync.validate_config()
+                DNS_ZONES="example.com,internal.example.com,apps.example.com"), clear=True):
+            self.assertEqual(sync.validate_config()["zones"],
+                             ("example.com", "internal.example.com", "apps.example.com"))
+        for zones in ("example.com,example.com", "example.com,Example.COM."):
+            with self.subTest(zones=zones), patch.dict(os.environ, self._base_environment(DNS_ZONES=zones), clear=True):
+                with self.assertRaisesRegex(ValueError, "repeat"):
+                    sync.validate_config()
         with patch.dict(os.environ, self._base_environment(NPM_SECRET="  "), clear=True):
             with self.assertRaises(ValueError):
                 sync.validate_config()

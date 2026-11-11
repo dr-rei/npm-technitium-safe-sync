@@ -76,6 +76,17 @@ domain (your public DNS provider, or your internal/AD DNS). Technitium checks it
 local records first and forwards only what it does not have. An existing
 Forwarder zone works as it is.
 
+> **HTTP/3 in Forwarder zones (fixes `ERR_QUIC_PROTOCOL_ERROR`):** browsers also
+> ask DNS for an `HTTPS` record (type 65). Many public DNS providers (Cloudflare,
+> for example) publish one advertising HTTP/3 and the public IP. Forwarded to
+> internal clients, it makes browsers try HTTP/3 (QUIC) against NPM, which fails
+> with `ERR_QUIC_PROTOCOL_ERROR`. From 1.0.6 the tool therefore also creates, for
+> every name it manages in a Forwarder zone, a local `HTTPS` record advertising only
+> `h2,http/1.1` with the same managed comment. It replaces the forwarded one and is
+> updated and deleted together with the A record. Primary zones never forward, so
+> they get none. After upgrading, flush Technitium's cache (**Cache → Flush**) and
+> restart the browser, or wait for cached answers to expire.
+
 > **IPv6 in Forwarder zones:** the tool creates only `A` (IPv4) records. Queries
 > for other record types are still forwarded, so if the public DNS has an `AAAA`
 > (IPv6) record for an NPM hostname, IPv6-capable clients receive that public
@@ -264,8 +275,18 @@ zone its name falls under, and all records point to the same `NPM_LAN_IP`.
   be mixed), and the token needs
   View + Modify on **each** one. If any listed zone is missing or unreadable, that
   cycle writes nothing in any zone.
-- Zones must not overlap or repeat: `abhatigroup.com,int.abhatigroup.com` is
-  rejected. The parent zone alone already covers every name beneath it.
+- A zone may not be listed twice. Names several levels deep, such as
+  `db.internal.abhatigroup.com`, are covered by the parent zone `abhatigroup.com`
+  automatically, as long as Technitium has no separate zone for `internal`.
+- **Nested zones:** if Technitium *does* host a separate zone for part of a domain
+  (for example `internal.abhatigroup.com` next to `abhatigroup.com`), list both:
+  `DNS_ZONES=abhatigroup.com,internal.abhatigroup.com`. Each name goes to the most
+  specific listed zone, exactly as Technitium answers it: `db.internal.abhatigroup.com`
+  is written to `internal.abhatigroup.com`, `portal.abhatigroup.com` to the parent.
+  The nested zone's own name (`internal.abhatigroup.com`) is never managed. Grant
+  the token View + Modify on the nested zone too. If a separate zone exists but is
+  not listed, names inside it are skipped with `SKIP …: it belongs to a separate
+  zone` and everything else still synchronizes.
 - Zones served by different NPM servers need one deployment per NPM server, each
   on its own Docker host with its own state.
 
@@ -326,9 +347,8 @@ The service never logs passwords, tokens or raw API responses. After fixing
 
 | Log message | Cause and fix |
 | --- | --- |
-| `Startup failed (ValueError)` | A setting has an invalid value: an `http://` URL without `ALLOW_INSECURE_HTTP=true`, a bad IP, zone list, number or boolean, an empty credential, or overlapping zones. Compare `.env` with the tables above |
-| `Startup failed (KeyError)` | A required setting is missing from `.env` |
-| `Startup failed (BlockingIOError)` | Another copy is already running against the same state volume. Run only one |
+| `Startup failed (<reason>)` | A setting is missing or invalid; the reason names it, for example `Missing required setting: NPM_URL`, `HTTP sends credentials in plaintext…` (set `ALLOW_INSECURE_HTTP=true` or use HTTPS), `DNS_ZONES must not repeat a zone`, or `Missing or invalid credential: NPM_SECRET`. Compare `.env` with the tables above |
+| `Startup failed (Another instance holds the state lock…)` | The service is still running while you ran an admin command, or a second copy uses the same state volume. Run `docker compose stop` first, then the command, then `docker compose start` |
 | `API transport, TLS, or JSON failure` | URL unreachable, wrong port, `localhost` used, firewall, or untrusted HTTPS certificate |
 | `API HTTP status 4xx` (for example 400, 401, 403) | Wrong NPM email or password, wrong URL path, or insufficient permissions |
 | `NPM authentication did not return a token` | The NPM login did not complete, for example because the account requires 2FA. Use a dedicated account without 2FA |
@@ -338,8 +358,12 @@ The service never logs passwords, tokens or raw API responses. After fixing
 | `DNS zone '…' must be an enabled Primary or Forwarder zone` | The zone exists but is disabled, or is a Secondary, Secondary Forwarder, Stub or Catalog zone (read-only copies). Use the zone on the server that owns it, or convert it |
 | `NPM returned no permitted active hostnames` | No enabled NPM host is inside `DNS_ZONES`, or the NPM user cannot see them (check **All Items**) |
 | `SKIP unmanaged existing DNS name …` | A record you created already uses that name. It is left alone; delete it in Technitium if this tool should manage the name |
-| `SKIP managed …: DNS changed or disappeared outside this service` | Someone edited or removed a record this tool created. It is never silently overwritten; resolve it deliberately |
+| `SKIP managed …: DNS changed or disappeared outside this service` | A record this tool created was edited or deleted by hand. It is never silently recreated or overwritten. **If you deleted it by mistake**, release it with [`--forget-missing`](#repair-ownership-after-manual-dns-changes) and the next cycle recreates it. If you edited it, restore it or release the name with `--forget` |
 | `SKIP name below delegation, forwarding or alias` | A parent name has an NS, FWD, CNAME or DNAME record, so a record here would be ignored or forwarded elsewhere |
+| `SKIP …: it belongs to a separate zone on this Technitium server that is not in DNS_ZONES` | Technitium hosts a separate zone for part of that name (for example `internal.abhatigroup.com`). Add it to `DNS_ZONES` and give the token View + Modify on it, then recreate. Other names are unaffected |
+| `SKIP …: Technitium rejected the write`, then `Cycle FAILED (Technitium rejected N write(s)…)` | Technitium refused those records, most often because the token lacks Modify (or Delete) permission on the zone. Nothing was written for them; all other names were still processed, and the cycle reports failed so the healthcheck shows the problem |
+| `Stopped managing …: it is now the apex of a zone in DNS_ZONES` | A name the tool created is now the name of a listed nested zone. The tool no longer touches it; the old parent-zone record is shadowed and can be deleted by hand |
+| Browser shows `ERR_QUIC_PROTOCOL_ERROR` | HTTP/3 hints forwarded from the public DNS (Forwarder zones). Upgrade to 1.0.6 or newer, which adds the local `HTTPS` record, then flush Technitium's cache and restart the browser |
 | `Cycle FAILED (…)` | A temporary API failure. The service retries after the polling interval; earlier writes in that cycle are kept |
 
 ### 9. Optional: automatic deletions
@@ -375,8 +399,38 @@ docker compose up -d --force-recreate
 | Replace the Technitium token | Create a new token (Administration → Sessions), put it in `TECHNITIUM_TOKEN`, recreate, confirm a `Cycle completed` line, then delete the old token in Sessions |
 | Preview changes again | Set `DRY_RUN=true` and recreate. Nothing is written until you set it back to `false` |
 | Pause syncing | `docker compose stop`; resume with `docker compose start`. DNS records stay as they are |
-| See what the tool manages | In Technitium, records it created carry the comment `managed-by:npm-technitium-safe-sync/v1`. Do not add that comment to your own records: the tool still will not treat them as its own |
+| See what the tool manages | In Technitium, records it created (A records, plus `HTTPS` records in Forwarder zones) carry the comment `managed-by:npm-technitium-safe-sync/v1`. Do not add that comment to your own records: the tool still will not treat them as its own |
+| Recreate records deleted by mistake | Stop the service and run `--forget-missing`; see [Repair ownership](#repair-ownership-after-manual-dns-changes) |
 | Update the tool | See [Update to a new version](#update-to-a-new-version) |
+
+#### Repair ownership after manual DNS changes
+
+The tool remembers which names it created (see `--list-owned`). If you delete or
+edit one of its records by hand, it logs `SKIP managed …` every cycle and never
+recreates or overwrites it by itself. To hand a name back to the tool, release it.
+These commands change only the tool's state file, never DNS, and need the service
+stopped:
+
+```sh
+cd ~/npm-technitium-safe-sync
+docker compose stop
+docker compose run --rm npm-technitium-safe-sync --list-owned
+docker compose run --rm npm-technitium-safe-sync --forget-missing
+docker compose start
+docker compose logs --tail=50 npm-technitium-safe-sync
+```
+
+| Command | Releases |
+| --- | --- |
+| `--list-owned` | Nothing; lists every owned name and its IP |
+| `--forget-missing` | Owned names that have **no DNS record left** (deleted by hand). Safest choice; the next cycle recreates them |
+| `--forget NAME_OR_PATTERN…` | Specific names or wildcards, for example `--forget api-sac.abhatigroup.com` or `--forget '*.internal.abhatigroup.com'` (quote patterns) |
+| `--forget-all` | Every owned name |
+
+After a release, the next cycle creates a released name **only if it has no DNS
+record**. A record that still exists (for example one you edited) is then treated
+like any manual record and left alone; delete it in Technitium first if the tool
+should recreate it. Back up the state before `--forget-all` (see below).
 
 **HTTPS with a private certificate authority.** If NPM or Technitium uses a
 certificate signed by your own CA, copy the CA certificate (PEM format) into the
@@ -397,8 +451,8 @@ never switched off. Keep the added line when you re-download `compose.yaml`.
 **Uninstall.** Removing the tool does not remove the DNS records it created; they
 keep resolving until you delete them.
 
-1. Optionally delete the records first: in Technitium, remove the records with the
-   comment `managed-by:npm-technitium-safe-sync/v1`.
+1. Optionally delete the records first: in Technitium, remove the records (A, and
+   HTTPS in Forwarder zones) with the comment `managed-by:npm-technitium-safe-sync/v1`.
 2. Stop and remove the container: `docker compose down`. The state volume is kept,
    so reinstalling later picks up where it left off.
 3. To remove everything, including the state: `docker compose down -v`, then
@@ -557,6 +611,31 @@ NPM uses `POST /api/tokens` then `GET /api/nginx/proxy-hosts` with a bearer toke
 `TECHNITIUM_AUTH_MODE=bearer` targets Technitium **15+**, whose API documents bearer authentication. For older Technitium versions use `parameter`; the token is sent in a POST form body, never a query URL. All Technitium calls use POST forms. Both modes are tested against actual Technitium 15.6.2; older releases and your installed configuration still need staging validation.
 
 Use trusted HTTPS certificates, final URLs without redirects, and firewalls limiting management-port access. HTTP requires `ALLOW_INSECURE_HTTP=true` and sends credentials in plaintext. For a private CA, mount a CA bundle read-only and set `SSL_CERT_FILE` to its container path; do not disable TLS verification. Ambient HTTP proxy variables are intentionally ignored. When using host management endpoints from Docker, `localhost` refers to this new container; use reachable host/IP addresses or appropriate Docker networks.
+
+## Nested zones, HTTP/3 and per-name failures in 1.0.6
+
+Version 1.0.6 fixes three issues seen with a Forwarder zone in production:
+
+- **One rejected name no longer stops the cycle.** When Technitium explicitly
+  refuses a write (for example a name inside a separate zone, or missing
+  permission), nothing was applied, so that name is skipped as a conflict with a
+  specific reason and all other names continue. Uncertain failures (timeouts, TLS,
+  invalid token) still stop the cycle.
+- **Nested zones** such as `abhatigroup.com,internal.abhatigroup.com` can be listed
+  together; each name goes to its most specific zone.
+- **`ERR_QUIC_PROTOCOL_ERROR` fix:** in Forwarder zones each managed name also gets
+  a local `HTTPS` record advertising only HTTP/2 and HTTP/1.1, replacing forwarded
+  HTTP/3 hints. Existing managed names receive it on the first cycle after upgrade.
+  Its TTL is set when it is created; a later `DNS_TTL_SECONDS` change updates only
+  the A records.
+- **Ownership repair commands** `--list-owned`, `--forget-missing`, `--forget` and
+  `--forget-all` hand names back to the tool after manual DNS changes, so records
+  deleted by mistake are recreated on the next cycle.
+- **Clearer startup errors:** the reason (for example `Missing required setting:
+  NPM_URL`) is shown instead of only an error class.
+
+State format, ownership marker and defaults are unchanged. Upgrade by replacing
+`SYNC_IMAGE` as described in [Update to a new version](#update-to-a-new-version).
 
 ## Forwarder zones in 1.0.5
 

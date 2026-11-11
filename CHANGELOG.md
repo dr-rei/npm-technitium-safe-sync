@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.6
+
+- An explicit Technitium rejection of one write (status `error`, nothing applied) no longer stops the other names. A name inside a separate, unlisted zone is a conflict with a specific reason; any other rejection (for example missing permission) is skipped too, but the cycle then reports failed so the healthcheck shows it. Transport, TLS and token failures still abort immediately. Remote error text is classified, never logged.
+- Allow nested zones in `DNS_ZONES` (for example `abhatigroup.com,internal.abhatigroup.com`). Names route to the most specific zone; snapshots ignore parent records shadowed by a listed nested zone; a listed zone's apex is never managed, and earlier ownership of such a name is released with a warning.
+- Fix `ERR_QUIC_PROTOCOL_ERROR` in Forwarder zones: each managed name also gets a local HTTPS (SVCB type 65) record advertising only `h2,http/1.1`, replacing forwarded HTTP/3 and public address hints. It is owned, updated and deleted with the A record; existing managed names receive it after upgrade. Primary zones are unchanged.
+- Add `--list-owned`, `--forget-missing`, `--forget NAME_OR_PATTERN...` and `--forget-all` to inspect and release ownership after manual DNS changes; they edit only the state file and require the stopped service (state lock).
+- An owned name now inside a listed nested zone is released when its old parent-zone record is detected as shadowed, so it is recreated in the nested zone instead of conflicting forever.
+- Startup errors show the locally authored reason (for example `Missing required setting: NPM_URL`) instead of only the error class.
+- Real-app CI covers an unlisted nested zone, a listed nested Primary zone and authoritative HTTPS answers without HTTP/3, and recovery of a hand-deleted record with `--forget-missing` against Technitium 15.6.2.
+
 ## 1.0.5
 
 - Support Technitium Forwarder (conditional-forwarder) zones in addition to Primary zones, for split DNS: NPM hostnames become local A overrides and all other names and record types are still forwarded.

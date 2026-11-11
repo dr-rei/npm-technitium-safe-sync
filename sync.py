@@ -3,6 +3,7 @@
 Only owns A records it created; all other DNS records are left untouched.
 """
 import fcntl
+import fnmatch
 import ipaddress
 import json
 import logging
@@ -26,6 +27,14 @@ LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 class SyncError(RuntimeError):
     """An operator-facing message authored locally, without remote response data."""
+
+
+class TechnitiumRejected(SyncError):
+    """Technitium definitively refused a request (status "error"): nothing was applied."""
+
+    def __init__(self, message, child_zone=False):
+        super().__init__(message)
+        self.child_zone = child_zone
 
 
 def error_summary(exc):
@@ -93,8 +102,10 @@ def validate_config():
         raise ValueError("Invalid identity or TECHNITIUM_AUTH_MODE")
     if not cfg["zones"] or any(normalized_name(z) != z for z in cfg["zones"]):
         raise ValueError("DNS_ZONES must be comma-separated DNS zone names")
-    if len(set(cfg["zones"])) != len(cfg["zones"]) or any(a.endswith("." + b) for a in cfg["zones"] for b in cfg["zones"] if a != b):
-        raise ValueError("DNS_ZONES must not overlap or repeat")
+    # Nested zones (example.com plus internal.example.com) are allowed: each name is
+    # routed to its longest matching zone, as Technitium itself does.
+    if len(set(cfg["zones"])) != len(cfg["zones"]):
+        raise ValueError("DNS_ZONES must not repeat a zone")
     if not 30 <= cfg["ttl"] <= 2_147_483_647 or not 30 <= cfg["interval"] <= threading.TIMEOUT_MAX or cfg["delete_grace"] < 300 or cfg["max_deletes"] < 0:
         raise ValueError("Invalid interval/TTL/deletion safety limits")
     if cfg["state_path"].parent != Path("/data") and os.environ.get("STATE_FILE") is None:
@@ -135,7 +146,12 @@ def api(method, url, params=None, payload=None, headers=None):
         raise SyncError("API transport, TLS, or JSON failure") from None
     if not isinstance(obj, (dict, list)):
         raise SyncError("API returned an invalid JSON shape")
-    if isinstance(obj, dict) and obj.get("status") in ("error", "invalid-token", "2fa-required"):
+    if isinstance(obj, dict) and obj.get("status") == "error":
+        # The remote message is only classified, never logged.
+        reason = obj.get("errorMessage")
+        raise TechnitiumRejected("Technitium API rejected request: error",
+                                 isinstance(reason, str) and "does not belong to the zone" in reason)
+    if isinstance(obj, dict) and obj.get("status") in ("invalid-token", "2fa-required"):
         raise SyncError("Technitium API rejected request: " + obj["status"])
     return obj
 
@@ -175,7 +191,9 @@ def npm_hosts(cfg):
                     raise SyncError("Malformed NPM hostname in a permitted zone; refusing changes")
                 ignored += 1
                 continue
-            if host["enabled"] and any(domain.endswith("." + zone) for zone in cfg["zones"]):
+            # A configured zone's own name is an apex (for example a nested zone's name
+            # inside its parent zone) and is never managed.
+            if host["enabled"] and domain not in cfg["zones"] and any(domain.endswith("." + zone) for zone in cfg["zones"]):
                 desired.add(domain)
         enabled += int(bool(host["enabled"]))
     if not desired and not cfg["allow_empty"]:
@@ -188,6 +206,13 @@ def npm_hosts(cfg):
 
 def zone_for(name, zones):
     matching = [z for z in zones if name.endswith("." + z)]
+    return max(matching, key=len) if matching else None
+
+
+def owner_zone(name, zones):
+    """The configured zone Technitium answers a name from: the longest match,
+    where a zone's own name (its apex) belongs to that zone, not to its parent."""
+    matching = [z for z in zones if name == z or name.endswith("." + z)]
     return max(matching, key=len) if matching else None
 
 
@@ -211,7 +236,7 @@ def tech_call(cfg, path, params=None, write=False):
 WRITABLE_ZONE_TYPES = frozenset({"Primary", "Forwarder"})
 
 
-def dns_records(cfg, zones=None):
+def dns_records(cfg, zones=None, zone_types=None, shadowed=None):
     records = {}
     for zone in (cfg["zones"] if zones is None else zones):
         check_stop(cfg)
@@ -220,6 +245,8 @@ def dns_records(cfg, zones=None):
         info = content.get("zone", {})
         if info.get("name", "").rstrip(".").lower() != zone or info.get("type") not in WRITABLE_ZONE_TYPES or info.get("disabled") is not False:
             raise SyncError("DNS zone '%s' must be an enabled Primary or Forwarder zone" % zone)
+        if zone_types is not None:
+            zone_types[zone] = info["type"]
         items = content.get("records")
         if not isinstance(items, list):
             raise SyncError("DNS record listing for %s is invalid" % zone)
@@ -235,6 +262,12 @@ def dns_records(cfg, zones=None):
             labels = name.removeprefix("*.").split(".")
             if len(name) > 253 or not all(re.fullmatch(r"[a-z0-9_-]{1,63}", label) for label in labels) or not (name == zone or name.endswith("." + zone)):
                 raise SyncError("Invalid or out-of-zone Technitium record")
+            if owner_zone(name, cfg["zones"]) != zone:
+                # Shadowed by a configured nested zone (for example an old parent-zone
+                # record at internal.example.com); Technitium never answers it.
+                if shadowed is not None:
+                    shadowed.setdefault(name, []).append(item)
+                continue
             records.setdefault(name, []).append(item)
     return records
 
@@ -248,6 +281,39 @@ def can_change(records, old_ip):
     return (len(records) == 1 and records[0].get("type") == "A"
             and records[0].get("comments") == MARKER and records[0].get("disabled") is False
             and not records[0].get("expiryTtl", 0) and a_values(records) == [old_ip])
+
+
+# Forwarder zones forward every record type the zone does not hold locally. Browsers
+# query HTTPS (SVCB type 65) records; a forwarded public one can advertise HTTP/3 and
+# public address hints, which breaks access through NPM (ERR_QUIC_PROTOCOL_ERROR). A
+# local companion advertising only HTTP/2 and HTTP/1.1 replaces it for managed names.
+HTTPS_ALPN = "h2,http/1.1"
+
+
+def is_owned_https(record):
+    data = record.get("rData", {})
+    return (record.get("type") == "HTTPS" and record.get("comments") == MARKER
+            and record.get("disabled") is False and not record.get("expiryTtl", 0)
+            and data.get("svcPriority") == 1 and data.get("svcTargetName") in ("", ".")
+            and data.get("svcParams") == {"alpn": HTTPS_ALPN})
+
+
+def owned_parts(records, old_ip):
+    """(A record, companion HTTPS record or None) when a name holds only this tool's
+    records; None when anything else is present or the A record does not match."""
+    a = [r for r in records if r.get("type") == "A"]
+    https = [r for r in records if r.get("type") == "HTTPS"]
+    if len(a) != 1 or len(https) > 1 or len(a) + len(https) != len(records) or not can_change(a, old_ip):
+        return None
+    if https and not is_owned_https(https[0]):
+        return None
+    return a[0], (https[0] if https else None)
+
+
+def https_params(domain, zone, ttl):
+    return {"domain": domain, "zone": zone, "type": "HTTPS", "ttl": ttl, "svcPriority": "1",
+            "svcTargetName": ".", "svcParams": "alpn|" + HTTPS_ALPN, "autoIpv4Hint": "false",
+            "autoIpv6Hint": "false", "comments": MARKER, "overwrite": "false"}
 
 
 def state_load(path):
@@ -326,13 +392,70 @@ def check_unchanged(cfg, domain, expected):
     check_stop(cfg)
 
 
-def reconcile(cfg, desired, snapshot, state, now=None):
+def reconcile(cfg, desired, snapshot, state, now=None, zone_types=None, shadowed=None):
     now = int(time.time() if now is None else now)
+    zone_types = zone_types or {}
+    shadowed = shadowed or {}
+    rejected = []  # Rejections other than "belongs to a separate zone".
     changes = {"added": 0, "updated": 0, "deleted": 0, "conflicts": 0, "pending": 0}
 
     def commit():
         if not cfg["dry_run"]:
             state_save(cfg["state_path"], state)
+
+    def write(domain, path, params):
+        """Apply one mutation. An explicit Technitium rejection changed nothing, so it
+        is a per-name conflict; transport/auth failures (uncertain outcome) still abort."""
+        try:
+            tech_call(cfg, path, params, write=True)
+            return True
+        except TechnitiumRejected as exc:
+            changes["conflicts"] += 1
+            if exc.child_zone:
+                LOG.warning("SKIP %s: it belongs to a separate zone on this Technitium server "
+                            "that is not in DNS_ZONES; add that zone to DNS_ZONES and grant the "
+                            "token access to manage it. Nothing was written", domain)
+            else:
+                rejected.append(domain)
+                LOG.warning("SKIP %s: Technitium rejected the write (check the token's zone "
+                            "permissions and the record); nothing was written", domain)
+            return False
+
+    def ensure_https(domain, zone, ip):
+        """Add the companion HTTPS record after a fresh reread proves the name holds
+        exactly this tool's A record. Returns True when it was (or would be) added."""
+        LOG.info("%s ADD %s HTTPS alpn=%s (replaces forwarded HTTP/3 hints)",
+                 "PLAN" if cfg["dry_run"] else "APPLY", domain, HTTPS_ALPN)
+        if cfg["dry_run"]:
+            return True
+        fresh = dns_records(cfg, (zone,))
+        parts = owned_parts(fresh.get(domain, []), ip)
+        if parts is None or parts[1] is not None or has_blocking_ancestor(domain, zone, fresh):
+            changes["conflicts"] += 1
+            LOG.warning("SKIP HTTPS companion for %s: DNS changed during reconciliation", domain)
+            return False
+        check_stop(cfg)
+        return write(domain, "/api/zones/records/add", https_params(domain, zone, cfg["ttl"]))
+
+    # An owned name now inside a listed nested zone: Technitium answers it from that
+    # zone, and this tool's old parent-zone record is shadowed. Release it so the name
+    # is created in the nested zone (below, in this same cycle) instead of conflicting.
+    for domain in sorted(name for name in state["owned"] if name not in snapshot and name not in cfg["zones"]):
+        if any(r.get("type") == "A" and r.get("comments") == MARKER
+               and r.get("rData", {}).get("ipAddress") == state["owned"][domain] for r in shadowed.get(domain, [])):
+            LOG.warning("Moved %s to nested zone %s in DNS_ZONES. The old record in the parent zone "
+                        "is shadowed; delete it by hand", domain, owner_zone(domain, cfg["zones"]))
+            del state["owned"][domain]
+            state["stale_since"].pop(domain, None)
+
+    # A configured zone's own name is never managed. Ownership from before that zone
+    # was listed refers to a shadowed parent-zone record; stop tracking it.
+    for domain in sorted(name for name in state["owned"] if name in cfg["zones"]):
+        changes["conflicts"] += 1
+        LOG.warning("Stopped managing %s: it is now the apex of a zone in DNS_ZONES. Any record "
+                    "this tool left for it in the parent zone is shadowed; delete it by hand", domain)
+        del state["owned"][domain]
+        state["stale_since"].pop(domain, None)
 
     # Validated source presence ends absence, even when DNS conflicts or later
     # writes fail. Persist this before mutations so a restart cannot revive it.
@@ -362,29 +485,40 @@ def reconcile(cfg, desired, snapshot, state, now=None):
             LOG.info("%s ADD %s A %s", "PLAN" if cfg["dry_run"] else "APPLY", domain, cfg["ip"])
             if not cfg["dry_run"]:
                 check_unchanged(cfg, domain, existing)
-                tech_call(cfg, "/api/zones/records/add", {
-                    "domain": domain, "zone": zone, "type": "A", "ipAddress": cfg["ip"],
-                    "ttl": cfg["ttl"], "comments": MARKER, "overwrite": "false",
-                    "ptr": "false", "updateSvcbHints": "false"}, write=True)
+                if not write(domain, "/api/zones/records/add", {
+                        "domain": domain, "zone": zone, "type": "A", "ipAddress": cfg["ip"],
+                        "ttl": cfg["ttl"], "comments": MARKER, "overwrite": "false",
+                        "ptr": "false", "updateSvcbHints": "false"}):
+                    continue
                 state["owned"][domain] = cfg["ip"]
                 commit()
             changes["added"] += 1
+            if zone_types.get(zone) == "Forwarder":
+                ensure_https(domain, zone, cfg["ip"])  # Part of this add; not counted again.
             continue
-        if not can_change(existing, owned_ip):
+        parts = owned_parts(existing, owned_ip)
+        if parts is None:
             changes["conflicts"] += 1
             LOG.warning("SKIP managed %s: DNS changed or disappeared outside this service", domain)
             continue
-        if owned_ip != cfg["ip"] or existing[0].get("ttl") != cfg["ttl"]:
+        a_updated = False
+        if owned_ip != cfg["ip"] or parts[0].get("ttl") != cfg["ttl"]:
             LOG.info("%s UPDATE %s A %s -> %s TTL %d", "PLAN" if cfg["dry_run"] else "APPLY", domain, owned_ip, cfg["ip"], cfg["ttl"])
             if not cfg["dry_run"]:
                 check_unchanged(cfg, domain, existing)
-                tech_call(cfg, "/api/zones/records/update", {
-                    "domain": domain, "zone": zone, "type": "A", "ipAddress": owned_ip,
-                    "newIpAddress": cfg["ip"], "ttl": cfg["ttl"], "comments": MARKER,
-                    "ptr": "false", "updateSvcbHints": "false"}, write=True)
+                if not write(domain, "/api/zones/records/update", {
+                        "domain": domain, "zone": zone, "type": "A", "ipAddress": owned_ip,
+                        "newIpAddress": cfg["ip"], "ttl": cfg["ttl"], "comments": MARKER,
+                        "ptr": "false", "updateSvcbHints": "false"}):
+                    continue
                 state["owned"][domain] = cfg["ip"]
                 commit()
             changes["updated"] += 1
+            a_updated = True
+        if parts[1] is None and zone_types.get(zone) == "Forwarder":
+            # Records created before 1.0.6, or whose companion add was interrupted.
+            if ensure_https(domain, zone, state["owned"][domain]) and not a_updated:
+                changes["updated"] += 1
     if cfg["deletions"]:
         absent = set(state["owned"]) - desired
         stale = sorted(name for name in absent if zone_for(name, cfg["zones"]) is not None)
@@ -407,7 +541,8 @@ def reconcile(cfg, desired, snapshot, state, now=None):
                     continue
                 old_ip = state["owned"][domain]
                 existing = snapshot.get(domain, [])
-                if not can_change(existing, old_ip):
+                parts = owned_parts(existing, old_ip)
+                if parts is None:
                     changes["conflicts"] += 1
                     LOG.warning("SKIP delete %s: record no longer matches owned state", domain)
                     continue
@@ -420,13 +555,24 @@ def reconcile(cfg, desired, snapshot, state, now=None):
                 LOG.warning("%s DELETE %s A %s", "PLAN" if cfg["dry_run"] else "APPLY", domain, old_ip)
                 if not cfg["dry_run"]:
                     check_unchanged(cfg, domain, existing)
-                    tech_call(cfg, "/api/zones/records/delete", {"domain": domain, "zone": target_zone,
-                                                                  "type": "A", "ipAddress": old_ip}, write=True)
+                    if parts[1] is not None and not write(domain, "/api/zones/records/delete", {
+                            "domain": domain, "zone": target_zone, "type": "HTTPS", "svcPriority": "1",
+                            "svcTargetName": ".", "svcParams": "alpn|" + HTTPS_ALPN}):
+                        continue
+                    if not write(domain, "/api/zones/records/delete", {"domain": domain, "zone": target_zone,
+                                                                         "type": "A", "ipAddress": old_ip}):
+                        continue
                     del state["owned"][domain]
                     del state["stale_since"][domain]
                     commit()
                 changes["deleted"] += 1
     commit()
+    if rejected:
+        # Every name was processed, but a refusal that is not a zone-layout issue (for
+        # example lost Modify/Delete permission) must surface as a failed cycle so the
+        # healthcheck reports it instead of staying green while nothing changes.
+        raise SyncError("Technitium rejected %d write(s); all other names were processed. "
+                        "Check the token's Modify/Delete permissions on the affected zones" % len(rejected))
     return changes
 
 
@@ -434,16 +580,61 @@ def run_once(cfg):
     check_stop(cfg)
     desired = npm_hosts(cfg)  # Read & validate entire source BEFORE any write
     check_stop(cfg)
-    snapshot = dns_records(cfg)  # Read & validate every zone BEFORE any write
+    zone_types, shadowed = {}, {}
+    snapshot = dns_records(cfg, zone_types=zone_types, shadowed=shadowed)  # Read & validate every zone BEFORE any write
     check_stop(cfg)
     state = state_load(cfg["state_path"])
-    result = reconcile(cfg, desired, snapshot, state)
+    result = reconcile(cfg, desired, snapshot, state, zone_types=zone_types, shadowed=shadowed)
     LOG.info("Cycle completed: %s", json.dumps(result, sort_keys=True))
     marker = cfg["state_path"].parent / "last_success"
     tmp = marker.with_name(marker.name + ".tmp")
     tmp.write_text(str(int(time.time())))
     os.replace(tmp, marker)  # The healthcheck never observes a partial timestamp.
     return result
+
+
+ADMIN_COMMANDS = ("--list-owned", "--forget-missing", "--forget-all", "--forget")
+USAGE = ("Supported arguments: --check, --once, --healthcheck, --list-owned, "
+         "--forget-missing, --forget-all, --forget NAME_OR_PATTERN...")
+
+
+def admin(cfg, args):
+    """Operator commands that inspect or release ownership in the state file. Releasing
+    never touches DNS: a released name is treated as new by the next cycle, which
+    creates it only if no record exists for it (existing records stay unmanaged)."""
+    state = state_load(cfg["state_path"])
+    owned = sorted(state["owned"])
+    if args == ["--list-owned"]:
+        for name in owned:
+            since = state["stale_since"].get(name)
+            print("%s A %s%s" % (name, state["owned"][name],
+                                 "" if since is None else " (absent from NPM since %d)" % since), flush=True)
+        LOG.info("%d owned names", len(owned))
+        return 0
+    if args == ["--forget-missing"]:
+        # Only names whose zone is still configured can be checked; others are kept.
+        snapshot = dns_records(cfg)
+        targets = [n for n in owned if owner_zone(n, cfg["zones"]) is not None and not snapshot.get(n)]
+    elif args == ["--forget-all"]:
+        targets = owned
+    elif args[0] == "--forget" and len(args) > 1:
+        patterns = [a.strip().rstrip(".").lower() for a in args[1:]]
+        if not all(patterns):
+            raise ValueError("--forget needs names or patterns such as '*.internal.example.com'")
+        targets = [n for n in owned if any(fnmatch.fnmatchcase(n, pattern) for pattern in patterns)]
+    else:
+        raise ValueError(USAGE)
+    if not targets:
+        LOG.info("Nothing to release; state unchanged")
+        return 0
+    for name in targets:
+        LOG.warning("Released %s (was A %s). The next cycle creates it if the name has no "
+                    "DNS records; an existing record is left unmanaged", name, state["owned"][name])
+        del state["owned"][name]
+        state["stale_since"].pop(name, None)
+    state_save(cfg["state_path"], state)
+    LOG.info("Released %d of %d owned names", len(targets), len(owned))
+    return 0
 
 
 def main():
@@ -456,9 +647,13 @@ def main():
             return 0 if 0 <= age <= max(120, 3 * int(os.environ.get("SYNC_INTERVAL_SECONDS", "300"))) else 1
         except (OSError, ValueError):
             return 1
-    if sys.argv[1:] not in ([], ["--check"], ["--once"]):
-        raise ValueError("Supported arguments: --check, --once, --healthcheck")
-    cfg = validate_config()
+    args = sys.argv[1:]
+    if args not in ([], ["--check"], ["--once"]) and (not args or args[0] not in ADMIN_COMMANDS):
+        raise ValueError(USAGE)
+    try:
+        cfg = validate_config()
+    except KeyError as exc:
+        raise ValueError("Missing required setting: %s" % exc.args[0]) from None
     if sys.argv[1:] == ["--check"]:
         LOG.info("Configuration valid; no API requests made")
         return 0
@@ -468,7 +663,13 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     cfg["state_path"].parent.mkdir(parents=True, exist_ok=True)
     with open(cfg["state_path"].parent / "sync.lock", "a+") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SyncError("Another instance holds the state lock. Stop the running service "
+                            "first (docker compose stop), run this command, then start it again") from None
+        if args and args[0] in ADMIN_COMMANDS:
+            return admin(cfg, args)
         if sys.argv[1:] == ["--once"]:
             run_once(cfg)
             return 0
@@ -484,5 +685,8 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:
-        LOG.critical("Startup failed (%s); check required settings and state volume permissions", error_summary(exc))
+        # Configuration messages are authored locally and name settings, never values
+        # of credentials, so they are shown in full.
+        reason = str(exc) if isinstance(exc, ValueError) and str(exc) else error_summary(exc)
+        LOG.critical("Startup failed (%s); check required settings and state volume permissions", reason)
         sys.exit(1)

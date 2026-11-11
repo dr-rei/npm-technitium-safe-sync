@@ -47,6 +47,8 @@ State format version 1, ownership marker and conservative defaults are unchanged
 | Deletion | Actual disabled source, grace, explicit deletion and authoritative absence; local cap/returning-source timer/removed-zone cases |
 | Multiple zones | Invalid second zone prevents all mutations; overlapping configuration is rejected |
 | Alias/delegation | Local initial/final rereads for NS/FWD/CNAME/DNAME, apex aliases and normal SOA/NS/FWD |
+| Nested zones and rejections (1.0.6) | Actual unlisted nested zone: inner name rejected per name while the cycle completes; listed nested Primary zone receives names; apex released; local snapshot shadowing and rejection/permission cases |
+| HTTPS companion (1.0.6) | Actual Forwarder zone: local HTTPS record with `alpn=h2,http/1.1` answered authoritatively without HTTP/3, kept on IP update, deleted with the A record; local backfill, dry-run, manual-record conflict and no-adoption cases |
 | Forwarder zones (1.0.5) | Actual Forwarder zone: local override create, authoritative answer, IP update, grace deletion, subtree FWD refusal, apex forwarding rule preserved; local replica-type refusal |
 | Failure recovery | Local HTTP/redirect/schema/size/corrupt-state/storage tests; successful first-write persistence, retry, orphan refusal |
 | Container operation | CI nonroot/read-only/no-external-network local tests, startup smoke, lock, health and Compose validation |

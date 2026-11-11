@@ -51,14 +51,14 @@ class OperationTests(unittest.TestCase):
                 snapshot[params["domain"]] = [managed(config["ip"])]
                 return {"status": "ok"}
             with patch.object(sync, "npm_hosts", return_value=desired), \
-                    patch.object(sync, "dns_records", side_effect=lambda *_: copy.deepcopy(snapshot)), \
+                    patch.object(sync, "dns_records", side_effect=lambda *_, **__: copy.deepcopy(snapshot)), \
                     patch.object(sync, "tech_call", side_effect=write):
                 with self.assertRaises(RuntimeError):
                     sync.run_once(conf)
             self.assertEqual(sync.state_load(conf["state_path"])["owned"],
                              {"a.apps.example.com": conf["ip"]})
             with patch.object(sync, "npm_hosts", return_value=desired), \
-                    patch.object(sync, "dns_records", side_effect=lambda *_: copy.deepcopy(snapshot)), \
+                    patch.object(sync, "dns_records", side_effect=lambda *_, **__: copy.deepcopy(snapshot)), \
                     patch.object(sync, "tech_call", return_value={"status": "ok"}) as api:
                 self.assertEqual(sync.run_once(conf)["added"], 1)
                 self.assertEqual(api.call_args.args[2]["domain"], "b.apps.example.com")
@@ -72,15 +72,63 @@ class OperationTests(unittest.TestCase):
             def fake(config, path, params=None, write=False):
                 if path.endswith("/get"):
                     zone = params["zone"]
+                    stored = [{"name": d, "type": "A", "disabled": False, "comments": sync.MARKER, "ttl": 120,
+                               "rData": {"ipAddress": config["ip"]}} for z, d in writes if z == zone]
                     return {"status": "ok", "response": {"zone": {"name": zone, "type": types[zone], "disabled": False},
-                            "records": [{"name": zone, "type": "SOA", "disabled": False, "rData": {}}]}}
+                            "records": [{"name": zone, "type": "SOA", "disabled": False, "rData": {}}] + stored}}
                 writes.append((params["zone"], params["domain"]))
                 return {"status": "ok"}
             with patch.object(sync, "npm_hosts", return_value={"app.lan.example.com", "www.example.com"}),                     patch.object(sync, "tech_call", side_effect=fake) as api:
                 self.assertEqual(sync.run_once(conf)["added"], 2)
-            self.assertEqual(sorted(writes), [("example.com", "www.example.com"), ("lan.example.com", "app.lan.example.com")])
+            # Only the Forwarder zone gets the HTTPS companion (A + HTTPS writes).
+            self.assertEqual(sorted(writes), [("example.com", "www.example.com"),
+                                              ("lan.example.com", "app.lan.example.com"),
+                                              ("lan.example.com", "app.lan.example.com")])
             rereads = [c.args[2]["zone"] for c in api.call_args_list if c.args[1].endswith("/get")][2:]
-            self.assertEqual(rereads, ["lan.example.com", "example.com"])
+            self.assertEqual(rereads, ["lan.example.com", "lan.example.com", "example.com"])
+
+    def test_nested_zone_apex_is_not_desired_but_its_children_are(self):
+        conf = cfg(Path("unused"))
+        conf["zones"] = ("example.com", "internal.example.com")
+        hosts = [{"enabled": True, "domain_names": [
+            "portal.example.com", "internal.example.com", "db.internal.example.com", "a.b.internal.example.com"]}]
+        with patch.object(sync, "api", side_effect=[{"token": "t"}, hosts]):
+            desired = sync.npm_hosts(conf)
+        self.assertEqual(desired, {"portal.example.com", "db.internal.example.com", "a.b.internal.example.com"})
+        self.assertEqual({sync.zone_for(n, conf["zones"]) for n in desired - {"portal.example.com"}},
+                         {"internal.example.com"})
+
+    def test_nested_zone_shadows_parent_records_in_snapshot(self):
+        conf = cfg(Path("unused"))
+        conf["zones"] = ("example.com", "internal.example.com")
+        listings = {
+            "example.com": [{"name": "example.com", "type": "SOA", "disabled": False, "rData": {}},
+                            {"name": "internal.example.com", "type": "A", "disabled": False,
+                             "comments": sync.MARKER, "rData": {"ipAddress": "192.0.2.20"}},
+                            {"name": "old.internal.example.com", "type": "A", "disabled": False, "rData": {}}],
+            "internal.example.com": [{"name": "internal.example.com", "type": "SOA", "disabled": False, "rData": {}},
+                                     {"name": "db.internal.example.com", "type": "A", "disabled": False, "rData": {}}]}
+        def fake(config, path, params=None, write=False):
+            zone = params["zone"]
+            return {"status": "ok", "response": {"zone": {"name": zone, "type": "Primary", "disabled": False},
+                                                 "records": listings[zone]}}
+        with patch.object(sync, "tech_call", side_effect=fake):
+            snapshot = sync.dns_records(conf)
+        self.assertEqual([r["type"] for r in snapshot["internal.example.com"]], ["SOA"])
+        self.assertNotIn("old.internal.example.com", snapshot)
+        self.assertIn("db.internal.example.com", snapshot)
+
+    def test_owned_name_that_became_a_listed_zone_apex_is_released(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = cfg(Path(d) / "state.json")
+            conf["zones"] = ("apps.example.com", "internal.apps.example.com")
+            state = {"version": 1, "owned": {"internal.apps.example.com": conf["ip"]}, "stale_since": {}}
+            with patch.object(sync, "tech_call") as api, self.assertLogs(sync.LOG, "WARNING") as logs:
+                result = sync.reconcile(conf, set(), {}, state)
+            self.assertEqual(result["conflicts"], 1)
+            api.assert_not_called()
+            self.assertEqual(sync.state_load(conf["state_path"])["owned"], {})
+            self.assertTrue(any("Stopped managing internal.apps.example.com" in line for line in logs.output))
 
     def test_pre_write_reread_reads_only_the_target_zone(self):
         conf = cfg(Path("/nonexistent/state.json"))
