@@ -27,19 +27,20 @@ Main publishes `drreilab/npm-technitium-safe-sync:main` plus `:sha-<full-commit>
 | --- | --- |
 | v1.0.0 | drreilab/npm-technitium-safe-sync:1.0.0 |
 | v1.0.1 | drreilab/npm-technitium-safe-sync:1.0.1 |
+| v1.0.2 | drreilab/npm-technitium-safe-sync:1.0.2 |
 | GitHub Latest stable release | drreilab/npm-technitium-safe-sync:latest |
 | Development main | drreilab/npm-technitium-safe-sync:main |
 
 A version sync requires a published GitHub release, an existing GHCR version image whose source/revision labels match that release, and the public destination repository. It waits up to roughly five minutes for a tag build, then fails for manual retry if the image is still unavailable. It copies all platforms/attestations using Skopeo with digest preservation. A different existing Docker Hub version fails closed instead of being replaced. Existing version matches are idempotent. `latest` is updated only when the requested tag equals GitHub's current Latest designation, so a historical backfill cannot move it backwards. Sync jobs are serialized.
 
-The default `docker pull drreilab/npm-technitium-safe-sync` resolves to `latest`. Prefer a version or exact digest in production. Version 1.0.0 is historical and contains the operational defects repaired in 1.0.1; prefer 1.0.1 or newer.
+The default `docker pull drreilab/npm-technitium-safe-sync` resolves to `latest`. Prefer a version or exact digest in production. Version 1.0.0 is historical and contains the operational defects repaired in 1.0.1; prefer 1.0.2 or newer.
 
 For a new release: push a new vMAJOR.MINOR.PATCH tag, wait for Verify and publish to finish, then publish the matching GitHub release. The sync workflow aligns latest. If another workflow creates a release with GITHUB_TOKEN and GitHub suppresses its follow-on event, explicitly dispatch the version-sync workflow. After changing GitHub's Latest designation, check the sync run or manually dispatch the newly selected latest tag. Verify actual workflow success and registry digests before advertising a tag.
 
 After successful version synchronization:
 
 ```sh
-docker pull drreilab/npm-technitium-safe-sync:1.0.1
+docker pull drreilab/npm-technitium-safe-sync:1.0.2
 ```
 
 Use a verified version or registry digest for production, rather than a moving main tag. Set `SYNC_IMAGE=docker.io/drreilab/npm-technitium-safe-sync@sha256:<verified-digest>` in the existing deployment .env; keep endpoints, file secrets and state unchanged. Then run `docker compose pull` and `docker compose up -d --force-recreate` after the normal backup/staging review.
