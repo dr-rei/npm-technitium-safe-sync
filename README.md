@@ -1,4 +1,4 @@
-# NPM → Technitium Safe Sync
+# NPM â†’ Technitium Safe Sync
 
 Poll enabled Nginx Proxy Manager proxy hosts and reconcile their hostnames to IPv4 `A` records in dedicated Technitium Primary zones. Every managed name points to **the NPM reverse proxy IP**, not its upstream service IP. Other record types, wildcard hosts, apex names, redirection hosts, and 404 hosts are excluded.
 
@@ -6,7 +6,7 @@ Project-maintained container image: `ghcr.io/dr-rei/npm-technitium-safe-sync`. T
 
 ## Publication and validation
 
-The first release is being prepared. Do not assume an image exists until its workflow succeeds and its registry digest is verified. The release evidence file records the actual result.
+Images are published from main and version tags. Use the selected GitHub release and its attached `RELEASE_EVIDENCE.md` to confirm the exact digest, workflow result and anonymous access checks. A prepared workflow or template alone is not evidence that a version was published.
 
 The tests use simulated local HTTP APIs. They do not establish compatibility with your live servers. Complete the staging procedure below before production writes. The synchronizer never needs your real credentials in GitHub Actions.
 
@@ -100,7 +100,7 @@ On main/tag pushes, the workflow runs unit and local-HTTP integration tests insi
 ## Operations
 
 - Persist `/data/state.json` on a local filesystem with working advisory locks. Protect and back up it and zone data. Do not delete state while running or copy it between different DNS servers.
-- Health reflects a successful **read/reconcile cycle**, including dry-run. A heartbeat older than `max(120, 3 × interval)` seconds is unhealthy. It is not a DNS resolution probe. Docker marks unhealthy containers but does not automatically restart them solely for health failure. Monitor health, cycle errors and conflict counts externally.
+- Health reflects a successful **read/reconcile cycle**, including dry-run. A heartbeat older than `max(120, 3 Ã— interval)` seconds is unhealthy. It is not a DNS resolution probe. Docker marks unhealthy containers but does not automatically restart them solely for health failure. Monitor health, cycle errors and conflict counts externally.
 - Configuration errors exit nonzero. API failures log a sanitized error class and retry at the interval. Config, credentials and CA files are loaded at startup; recreate after rotation/change. Graceful SIGTERM/SIGINT interrupts the polling wait.
 - The filesystem is read-only except the state mount and temporary directory; UID 10001, all capabilities dropped, no-new-privileges, bounded memory/processes and rotated logs. No ports or Docker socket are exposed.
 - To release, push a new main commit, wait for checks, then push a new `vMAJOR.MINOR.PATCH` tag at that tested commit. The workflow builds and verifies its own published digest. Tag publishing is authorized only for trusted maintainers; protect main and release tags in repository settings according to your policy.
