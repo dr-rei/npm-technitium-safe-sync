@@ -10,14 +10,14 @@ This is a publishing destination, not proof that an image exists. Check successf
 2. Create a Docker Hub publishing token with push permission. Do not paste it into chat, source code, .env or workflow YAML.
 3. In this GitHub repository, add the token as Actions secret `DOCKERHUB_TOKEN`. Set Actions variable `DOCKERHUB_USERNAME=drreilab` (the publishing login account).
 4. Set Actions variable `DOCKERHUB_ENABLED=true` only after the repository and token are ready. The accepted activation value is lowercase `true`; otherwise Docker Hub publishing is disabled. Login and verification follow the image-selection output, so they cannot run without Hub tags.
-5. Run **Verify and publish** manually on main, or push a new main commit. The existing verify job runs first. The publish job logs into each enabled registry, builds amd64/arm64 once and pushes the same build to both destinations.
+5. Main commits run checks and publish development images to GHCR only. Push a new vMAJOR.MINOR.PATCH tag to publish that numbered version to both registries after checks pass. Publish the matching GitHub release to align Docker Hub latest.
 6. Inspect the run result and its digest summary. Docker Hub checks require digest inspection, native/ARM64 startup, Compose pull, and an anonymous pull with an empty Docker credential configuration. A private/unpublished image fails the public-distribution check.
 
 When Docker Hub publishing is disabled, neither its login nor its tags/verification runs; missing Docker Hub credentials do not block GHCR. When enabled, an invalid/missing token or inaccessible destination fails publication verification. A multi-registry push is not atomic: if one destination succeeds and another fails, inspect both before retrying or advertising a version.
 
 ## Tags and deployment
 
-Main publishes `drreilab/npm-technitium-safe-sync:main` plus `:sha-<full-commit>`. A newly pushed `vMAJOR.MINOR.PATCH` tag publishes `:MAJOR.MINOR.PATCH` plus the commit tag to both enabled registries. The release-sync workflow also copies existing published releases from GHCR without rebuilding them, preserving the complete multiarchitecture digest. Do not move existing Git tags or rebuild released content merely to add another registry.
+Docker Hub contains only `latest` and numbered release tags such as `1.0.2`, `1.0.1` and `1.0.0`. A newly pushed `vMAJOR.MINOR.PATCH` tag publishes `:MAJOR.MINOR.PATCH` to both enabled registries. Main builds publish only `ghcr.io/dr-rei/npm-technitium-safe-sync:main`. No new `sha-<commit>` tags are created. The release-sync workflow also copies existing published releases from GHCR without rebuilding them, preserving the complete multiarchitecture digest. Do not move existing Git tags or rebuild released content merely to add another registry.
 
 ## GitHub release version matching
 
@@ -29,7 +29,6 @@ Main publishes `drreilab/npm-technitium-safe-sync:main` plus `:sha-<full-commit>
 | v1.0.1 | drreilab/npm-technitium-safe-sync:1.0.1 |
 | v1.0.2 | drreilab/npm-technitium-safe-sync:1.0.2 |
 | GitHub Latest stable release | drreilab/npm-technitium-safe-sync:latest |
-| Development main | drreilab/npm-technitium-safe-sync:main |
 
 A version sync requires a published GitHub release, an existing GHCR version image whose source/revision labels match that release, and the public destination repository. It waits up to roughly five minutes for a tag build, then fails for manual retry if the image is still unavailable. It copies all platforms/attestations using Skopeo with digest preservation. A different existing Docker Hub version fails closed instead of being replaced. Existing version matches are idempotent. `latest` is updated only when the requested tag equals GitHub's current Latest designation, so a historical backfill cannot move it backwards. Sync jobs are serialized.
 
@@ -48,3 +47,7 @@ Use a verified version or registry digest for production, rather than a moving m
 Public consumers do not need a publishing token or Docker login. Runtime NPM/Technitium credentials are unrelated to registry publishing credentials and remain in local file secrets. This is a project-maintained image, not a Docker Official Image badge.
 
 To suspend Docker Hub publishing, set DOCKERHUB_ENABLED=false. Revoke/rotate its token separately when needed. This does not delete an already published image or change existing GHCR images.
+
+## Manual tag cleanup
+
+The manual **Clean Docker Hub development tags** workflow accepts the exact confirmation `delete-extra-tags`. It removes only `main` and `sha-` followed by 40 lowercase hex characters in this project's Docker Hub repository. It preserves every other tag and verifies their digests remain unchanged. It never deletes manifests or the repository. Preview with `python3 scripts/clean-hub-tags.py`; applying requires the confirmed GitHub Actions workflow and a Docker Hub token with Delete permission. This workflow has no scheduled or automatic trigger.

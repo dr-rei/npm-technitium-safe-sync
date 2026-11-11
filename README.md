@@ -86,7 +86,7 @@ When upgrading from 1.0.0, first disable deletions and back up zone + state. The
 
 Production should set `SYNC_IMAGE=ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<verified-index-digest>` in `.env`. The release evidence includes an actual digest after publication. Version tag `:1.0.2` is readable but tags can be moved; a digest pins exact image content. `:main` tracks development and is not a production pin. GHCR has no floating `latest` tag; Docker Hub `latest` follows the GitHub Latest stable release.
 
-The workflow builds `linux/amd64` and `linux/arm64`, publishes `:main` for main pushes, `:MAJOR.MINOR.PATCH` for `vMAJOR.MINOR.PATCH` tags, plus full `:sha-<commit>` tags. SHA tags may refer to the most recent build for that commit (e.g. main versus a release); use a digest for immutability. Releases must use new version numbers; never retag an existing release.
+The workflow builds `linux/amd64` and `linux/arm64`. Main pushes publish `:main` to GHCR only. Version tags publish `:MAJOR.MINOR.PATCH` to both enabled registries; Docker Hub `latest` follows GitHub Latest. No new commit-hash tags are created. Docker Hub shows only `latest` and numbered releases. Use a digest for immutability. Releases must use new version numbers; never retag an existing release.
 
 ```sh
 # Verify the selected version, copy its digest into .env, then pull it.
@@ -99,7 +99,7 @@ Back up zone + state before an update. Roll back by setting the previous verifie
 
 ## Docker Hub distribution
 
-The workflow also supports the configured Docker Hub destination `docker.io/drreilab/npm-technitium-safe-sync`. Activation requires a public repository, GitHub publishing secret and explicit enable variable. Published stable GitHub releases map to matching numeric Docker Hub tags; `latest` follows GitHub Latest and `main` remains the development channel. A separate release-sync workflow preserves existing released digests when copying older versions. See [DOCKERHUB.md](DOCKERHUB.md) for setup, verification and deployment. A configured destination does not establish that an image has been published.
+The workflow also supports the configured Docker Hub destination `docker.io/drreilab/npm-technitium-safe-sync`. Activation requires a public repository, GitHub publishing secret and explicit enable variable. Published stable GitHub releases map to matching numeric Docker Hub tags; `latest` follows GitHub Latest; development `main` images are kept in GHCR only. A separate release-sync workflow preserves existing released digests when copying older versions. See [DOCKERHUB.md](DOCKERHUB.md) for setup, verification and deployment. A configured destination does not establish that an image has been published.
 
 ## GHCR permissions and release workflow
 

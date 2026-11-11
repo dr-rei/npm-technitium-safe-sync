@@ -52,7 +52,6 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
-          COMMIT: ${{ github.sha }}
           DOCKERHUB_ENABLED: ${{ vars.DOCKERHUB_ENABLED }}
         run: |
           image="ghcr.io/${REPOSITORY,,}"
@@ -62,11 +61,12 @@ jobs:
           else
             tag=main
           fi
-          tags="$image:$tag,$image:sha-$COMMIT"
+          tags="$image:$tag"
           hub_image=""
-          if [ "$DOCKERHUB_ENABLED" = true ]; then
+          # Docker Hub lists stable release versions only; main stays in GHCR.
+          if [ "$DOCKERHUB_ENABLED" = true ] && [ "$REF_TYPE" = tag ]; then
             hub_image="docker.io/drreilab/npm-technitium-safe-sync"
-            tags="$tags,$hub_image:$tag,$hub_image:sha-$COMMIT"
+            tags="$tags,$hub_image:$tag"
           fi
           echo "name=$image" >> "$GITHUB_OUTPUT"
           echo "hub_name=$hub_image" >> "$GITHUB_OUTPUT"

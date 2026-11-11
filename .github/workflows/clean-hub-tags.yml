@@ -1,0 +1,28 @@
+name: Clean Docker Hub development tags
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type delete-extra-tags to delete only main and sha-commit aliases
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: dockerhub-release-versions
+  cancel-in-progress: false
+jobs:
+  clean:
+    if: github.ref == 'refs/heads/main' && inputs.confirm == 'delete-extra-tags' && vars.DOCKERHUB_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Remove only development aliases and verify stable digests
+        env:
+          CLEANUP_CONFIRM: ${{ inputs.confirm }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: python3 scripts/clean-hub-tags.py --apply
