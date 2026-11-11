@@ -17,6 +17,63 @@ def managed(ip="192.0.2.20"):
 
 
 class OperationTests(unittest.TestCase):
+    def test_duplicate_active_names_remain_desired_when_one_host_is_disabled(self):
+        hosts = [{"enabled": True, "domain_names": ["app.apps.example.com", "alias.apps.example.com"]},
+                 {"enabled": True, "domain_names": ["APP.apps.example.com."]},
+                 {"enabled": False, "domain_names": ["app.apps.example.com"]}]
+        with patch.object(sync, "api", side_effect=[{"token": "dummy"}, hosts]):
+            self.assertEqual(sync.npm_hosts(cfg(Path("unused"))),
+                             {"app.apps.example.com", "alias.apps.example.com"})
+
+    def test_invalid_second_zone_aborts_before_any_writes(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = cfg(Path(d) / "state.json")
+            conf["zones"] = ("apps.example.com", "other.example.com")
+            responses = [{"status": "ok", "response": {"zone": {
+                "name": zone, "type": kind, "disabled": False}, "records": []}}
+                for zone, kind in (("apps.example.com", "Primary"), ("other.example.com", "Secondary"))]
+            with patch.object(sync, "npm_hosts", return_value={"app.apps.example.com"}), \
+                    patch.object(sync, "tech_call", side_effect=responses) as api:
+                with self.assertRaisesRegex(RuntimeError, "enabled Primary"):
+                    sync.run_once(conf)
+                self.assertEqual(api.call_count, 2)
+                self.assertTrue(all(call.args[1].endswith("/get") for call in api.call_args_list))
+                self.assertFalse(conf["state_path"].exists())
+
+    def test_successful_first_write_survives_later_failure_and_retry(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = cfg(Path(d) / "state.json")
+            desired = {"a.apps.example.com", "b.apps.example.com"}
+            snapshot = {}
+            def write(config, endpoint, params, write=False):
+                if params["domain"].startswith("b."):
+                    raise sync.SyncError("API transport, TLS, or JSON failure")
+                snapshot[params["domain"]] = [managed(config["ip"])]
+                return {"status": "ok"}
+            with patch.object(sync, "npm_hosts", return_value=desired), \
+                    patch.object(sync, "dns_records", side_effect=lambda _: copy.deepcopy(snapshot)), \
+                    patch.object(sync, "tech_call", side_effect=write):
+                with self.assertRaises(RuntimeError):
+                    sync.run_once(conf)
+            self.assertEqual(sync.state_load(conf["state_path"])["owned"],
+                             {"a.apps.example.com": conf["ip"]})
+            with patch.object(sync, "npm_hosts", return_value=desired), \
+                    patch.object(sync, "dns_records", side_effect=lambda _: copy.deepcopy(snapshot)), \
+                    patch.object(sync, "tech_call", return_value={"status": "ok"}) as api:
+                self.assertEqual(sync.run_once(conf)["added"], 1)
+                self.assertEqual(api.call_args.args[2]["domain"], "b.apps.example.com")
+
+    def test_orphan_with_matching_marker_is_never_automatically_adopted(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = cfg(Path(d) / "state.json")
+            with patch.object(sync, "tech_call") as api:
+                result = sync.reconcile(conf, {"app.apps.example.com"},
+                                        {"app.apps.example.com": [managed(conf["ip"])]},
+                                        sync.state_load(conf["state_path"]))
+            self.assertEqual(result["conflicts"], 1)
+            self.assertEqual(sync.state_load(conf["state_path"])["owned"], {})
+            api.assert_not_called()
+
     def test_empty_host_domain_list_aborts_before_state_or_dns_changes(self):
         with tempfile.TemporaryDirectory() as d:
             conf = cfg(Path(d) / "state.json", deletions=True)

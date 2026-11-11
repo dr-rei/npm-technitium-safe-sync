@@ -8,7 +8,7 @@ Project-maintained container image: `ghcr.io/dr-rei/npm-technitium-safe-sync`. T
 
 Images are published from main and version tags. Use the selected GitHub release and its attached `RELEASE_EVIDENCE.md` to confirm the exact digest, workflow result and anonymous access checks. A prepared workflow or template alone is not evidence that a version was published.
 
-The tests use simulated local HTTP APIs. They do not establish compatibility with your live servers. Complete the staging procedure below before production writes. The synchronizer never needs your real credentials in GitHub Actions.
+Tests include local HTTP fixtures and disposable real NPM **2.16.0** / Technitium **15.6.2** containers pinned by digest. Both authentication modes, restricted accounts, authoritative DNS and NPM-to-backend forwarding are exercised. See [INTEGRATION_REVIEW.md](INTEGRATION_REVIEW.md) for coverage, repairs and limits. Complete staging before production writes. The synchronizer never needs your real credentials in GitHub Actions.
 
 ## Safety contract
 
@@ -17,7 +17,7 @@ The tests use simulated local HTTP APIs. They do not establish compatibility wit
 - Never adopt an existing DNS name, even if it has the same IP or a managed comment. Ownership requires persisted state **and** the exact managed comment, one enabled A record, and the previous IP. A changed comment, disabled record, multiple records, or mixed types causes a conflict.
 - Before each mutation, read the DNS snapshot again and refuse the write if the target changed. Refuse names below NS delegations, DNAMEs or CNAMEs. Use dedicated zones without separately hosted child zones; separate child zones are not discoverable through the permitted parent-zone API.
 - Deletions require opt-in, ownership checks, a grace period (24 hours default) and a cap (five stale names default). Exceeding the cap blocks **all** deletions for that cycle. `ALLOW_EMPTY_NPM=true` is separately required to remove the final host.
-- State writes use flush/fsync and atomic rename. A local lock prevents two processes using the same state directory. Back up state and zones together.
+- State storage is tested before remote mutations; writes use flush/fsync, atomic rename and directory fsync. A local lock prevents two processes using the same state directory. Back up state and zones together.
 - API timeouts, response-size limits, certificate verification, disabled redirects, and disabled environment HTTP proxies protect management credentials. HTTPS is required unless plaintext HTTP is explicitly opted into on an isolated trusted network. API bodies, tokens, passwords and raw remote errors are not logged.
 
 **Limits:** Technitium provides no conditional-write/transaction contract for these endpoints. A change between the final read and write remains possible. Run exactly one synchronizer per zone, use one persistent local state volume, and coordinate manual edits. Multiple independent state volumes are not safe HA. A write followed by a crash before state persistence can leave an orphan; inspect it manually, as the service refuses automatic adoption. A failed cycle can contain earlier successful writes; it is not a transaction. Missing owned records are conflicts and are not silently recreated. DNSSEC-generated records can cause mixed-type conflicts; use a dedicated unsigned staging/production zone for this implementation. Large zones above the 4 MB API response limit fail closed.
@@ -68,7 +68,7 @@ docker compose logs --tail=100 -f
 
 NPM uses `POST /api/tokens` then `GET /api/nginx/proxy-hosts` with a bearer token. Enabled values may be JSON booleans or integer 0/1. The project uses the upstream proxy-host list shape; forks with incompatible schemas fail closed.
 
-`TECHNITIUM_AUTH_MODE=bearer` targets Technitium **15+**, whose API documents bearer authentication. For older Technitium versions use `parameter`; the token is sent in a POST form body, never a query URL. All Technitium calls use POST forms. Both authentication modes have local HTTP fixture coverage; compatibility with your installed release must be checked in staging.
+`TECHNITIUM_AUTH_MODE=bearer` targets Technitium **15+**, whose API documents bearer authentication. For older Technitium versions use `parameter`; the token is sent in a POST form body, never a query URL. All Technitium calls use POST forms. Both modes are tested against actual Technitium 15.6.2; older releases and your installed configuration still need staging validation.
 
 Use trusted HTTPS certificates, final URLs without redirects, and firewalls limiting management-port access. HTTP requires `ALLOW_INSECURE_HTTP=true` and sends credentials in plaintext. For a private CA, mount a CA bundle read-only and set `SSL_CERT_FILE` to its container path; do not disable TLS verification. Ambient HTTP proxy variables are intentionally ignored. When using host management endpoints from Docker, `localhost` refers to this new container; use reachable host/IP addresses or appropriate Docker networks.
 
@@ -105,13 +105,13 @@ For a private copy, authenticate with a GitHub classic PAT limited to `read:pack
 
 GitHub Actions uses its short-lived `GITHUB_TOKEN` with `contents:read` and, only for the publish job, `packages:write`. No personal package-publishing token or management secrets are needed. The OCI source label links the package to the repository; the repository must have Actions package access. Pull requests build/test without publishing. Actions are pinned to verified commit SHAs and the base image to its registry digest; Dependabot proposes updates weekly. Merge dependency updates only after checks pass.
 
-On main/tag pushes, the workflow runs unit and local-HTTP integration tests inside a nonroot container without external network, validates Compose, then builds/pushes and pulls the published digest to test image configuration and Compose pull. Provenance and SBOM are attached. The base-image pin needs regular reviewed updates to receive security fixes; an SBOM alone is not a vulnerability scan.
+On main/tag pushes, the workflow runs unit and local-HTTP integration tests inside a nonroot container without external network, validates Compose, and runs disposable real-app checks. Both test jobs must pass before it builds/pushes and pulls the published digest to test image configuration and Compose pull. Provenance and SBOM are attached. The base-image pin needs regular reviewed updates to receive security fixes; an SBOM alone is not a vulnerability scan.
 
 ## Operations
 
 - Persist `/data/state.json` on a local filesystem with working advisory locks. Protect and back up it and zone data. Do not delete state while running or copy it between different DNS servers.
 - Health reflects a successful **read/reconcile cycle**, including dry-run. A heartbeat older than `max(120, 3 Ã— interval)` seconds is unhealthy. It is not a DNS resolution probe. Docker marks unhealthy containers but does not automatically restart them solely for health failure. Monitor health, cycle errors and conflict counts externally.
-- Configuration errors exit nonzero. API failures log a sanitized error class and retry at the interval. Config, credentials and CA files are loaded at startup; recreate after rotation/change. Graceful SIGTERM/SIGINT interrupts the polling wait.
+- Configuration errors exit nonzero. API failures log locally authored safe reasons, or an error class for unexpected exceptions, then retry at the interval. Config, credentials and CA files are loaded at startup; recreate after rotation/change. SIGTERM/SIGINT interrupts the polling wait and stops further writes at cooperative checkpoints; an in-flight request can complete first.
 - The filesystem is read-only except the state mount and temporary directory; UID 10001, all capabilities dropped, no-new-privileges, bounded memory/processes and rotated logs. No ports or Docker socket are exposed.
 - To release, push a new main commit, wait for checks, then push a new `vMAJOR.MINOR.PATCH` tag at that tested commit. The workflow builds and verifies its own published digest. Tag publishing is authorized only for trusted maintainers; protect main and release tags in repository settings according to your policy.
 
