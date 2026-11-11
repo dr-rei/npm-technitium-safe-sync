@@ -1,0 +1,41 @@
+name: Real NPM and Technitium integration
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pull pinned upstream applications and build test client
+        run: |
+          docker pull jc21/nginx-proxy-manager:2.16.0@sha256:4393e642e233e5efd5adeb7f10918d4aaea71c9ed875b94190273fc8e87f9594
+          docker pull technitium/dns-server:15.6.2@sha256:eb48ac5c135f4ab936b536f74f853d53e15ab39ef37fdbc9598a089b90d9f245
+          docker build -t sync:integration .
+      - name: Start disposable applications on an internal-only network
+        run: |
+          docker network create --internal sync-ci
+          docker run -d --name npm --network sync-ci --cpus 1 --memory 1g --pids-limit 256 -e INITIAL_ADMIN_EMAIL=admin@sync.example.test -e INITIAL_ADMIN_PASSWORD='Disposable-CI-only-987!' -e DISABLE_IPV6=true jc21/nginx-proxy-manager:2.16.0@sha256:4393e642e233e5efd5adeb7f10918d4aaea71c9ed875b94190273fc8e87f9594
+          docker run -d --name dns --network sync-ci --cpus 1 --memory 512m --pids-limit 128 -e DNS_SERVER_DOMAIN=dns.sync.example.test -e DNS_SERVER_ADMIN_PASSWORD='Disposable-CI-only-987!' -e DNS_SERVER_RECURSION=Deny technitium/dns-server:15.6.2@sha256:eb48ac5c135f4ab936b536f74f853d53e15ab39ef37fdbc9598a089b90d9f245
+          docker run -d --name backend --network sync-ci --read-only --cap-drop ALL --security-opt no-new-privileges --memory 64m --pids-limit 16 -v "$PWD/ci/backend:/fixture:ro" --entrypoint python sync:integration -m http.server 8080 --directory /fixture
+      - name: Exercise real APIs, restricted accounts, DNS answers and proxy forwarding
+        run: |
+          docker run --rm --name sync-client --network sync-ci --read-only --cap-drop ALL --security-opt no-new-privileges --cpus 1 --memory 256m --pids-limit 32 --tmpfs /tmp:rw,noexec,nosuid,size=16m --tmpfs /data:rw,noexec,nosuid,size=16m,uid=10001,gid=10001 -e CI_DISPOSABLE_APPS=1 -v "$PWD/ci/real_apps.py:/ci-real-apps.py:ro" --entrypoint python sync:integration /ci-real-apps.py
+      - name: Disposable service diagnostics on failure
+        if: failure()
+        run: |
+          docker logs --tail 80 npm || true
+          docker logs --tail 80 dns || true
+          docker logs --tail 30 backend || true
+      - name: Remove disposable containers and network
+        if: always()
+        run: |
+          docker rm -f sync-client backend npm dns 2>/dev/null || true
+          docker network rm sync-ci 2>/dev/null || true
