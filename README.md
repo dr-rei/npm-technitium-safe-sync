@@ -2,7 +2,7 @@
 
 Poll enabled Nginx Proxy Manager proxy hosts and reconcile their hostnames to IPv4 `A` records in dedicated Technitium Primary zones. Every managed name points to **the NPM reverse proxy IP**, not its upstream service IP. Other record types, wildcard hosts, apex names, redirection hosts, and 404 hosts are excluded.
 
-Project-maintained container image: `ghcr.io/dr-rei/npm-technitium-safe-sync`. This is not affiliated with NPM or Technitium and does not carry Docker's Official Image badge.
+Project-maintained container image, identical in both registries: `docker.io/drreilab/npm-technitium-safe-sync` and `ghcr.io/dr-rei/npm-technitium-safe-sync`. To deploy, follow the [production quickstart](#production-quickstart-two-files-then-up); to update, see [Update to a new version](#update-to-a-new-version). This is not affiliated with NPM or Technitium and does not carry Docker's Official Image badge.
 
 ## Publication and validation
 
@@ -323,6 +323,59 @@ absent from NPM for `DELETE_GRACE_SECONDS` (24 hours by default), and at most
 `MAX_DELETES_PER_RUN` per cycle. Disabling an NPM host counts as removal. Records
 in zones you remove from `DNS_ZONES` are kept and must be cleaned up by hand.
 
+### 10. Everyday changes
+
+Settings are read only when the container starts. After **any** `.env` change run
+this from the deployment folder (a plain `docker compose restart` keeps the old
+values):
+
+```sh
+docker compose up -d --force-recreate
+```
+
+| Task | What to do |
+| --- | --- |
+| Add a site | Create the proxy host in NPM with a name inside `DNS_ZONES`. Its record appears within one polling interval; nothing to change here |
+| Change the NPM server IP | Set the new `NPM_LAN_IP` and recreate. Every record this tool created is updated to the new IP |
+| Change TTL or polling interval | Edit `DNS_TTL_SECONDS` / `SYNC_INTERVAL_SECONDS` and recreate. Existing records get the new TTL |
+| Add a zone | Create it in Technitium, grant `dns-sync` permission on it, append it to `DNS_ZONES`, recreate |
+| Remove a zone | Remove it from `DNS_ZONES` and recreate. Records already created there are kept; delete them by hand if unwanted |
+| Change the NPM password | Change it in NPM, put the new value in `NPM_SECRET`, recreate |
+| Replace the Technitium token | Create a new token (Administration → Sessions), put it in `TECHNITIUM_TOKEN`, recreate, confirm a `Cycle completed` line, then delete the old token in Sessions |
+| Preview changes again | Set `DRY_RUN=true` and recreate. Nothing is written until you set it back to `false` |
+| Pause syncing | `docker compose stop`; resume with `docker compose start`. DNS records stay as they are |
+| See what the tool manages | In Technitium, records it created carry the comment `managed-by:npm-technitium-safe-sync/v1`. Do not add that comment to your own records: the tool still will not treat them as its own |
+| Update the tool | See [Update to a new version](#update-to-a-new-version) |
+
+**HTTPS with a private certificate authority.** If NPM or Technitium uses a
+certificate signed by your own CA, copy the CA certificate (PEM format) into the
+deployment folder as `ca.pem`, make it readable (`chmod 644 ca.pem`), and add one
+line under `volumes:` in `compose.yaml`:
+
+```yaml
+    volumes:
+      - sync_data:/data
+      - ./ca.pem:/certs/ca.pem:ro
+```
+
+Then add `SSL_CERT_FILE=/certs/ca.pem` to `.env` and recreate. This file replaces
+the built-in public CA list, so if one endpoint uses a public certificate and the
+other a private one, put both CA certificates in `ca.pem`. Certificate checking is
+never switched off. Keep the added line when you re-download `compose.yaml`.
+
+**Uninstall.** Removing the tool does not remove the DNS records it created; they
+keep resolving until you delete them.
+
+1. Optionally delete the records first: in Technitium, remove the records with the
+   comment `managed-by:npm-technitium-safe-sync/v1`.
+2. Stop and remove the container: `docker compose down`. The state volume is kept,
+   so reinstalling later picks up where it left off.
+3. To remove everything, including the state: `docker compose down -v`, then
+   delete the deployment folder. Do this only after step 1 or if you will manage
+   those records by hand: a fresh install will not recognize them as its own.
+4. Remove the `dns-sync` user and token in Technitium and the `dns-sync` user in
+   NPM.
+
 ### State, updates and backups
 
 #### Where your data lives
@@ -420,7 +473,15 @@ files to merge.
 
 Requirements: Linux Docker Engine, Docker Compose v2, amd64 or arm64, and connectivity from the container to the management endpoints. Existing NPM and Technitium containers do not need restarting. The original `compose.yaml` uses file secrets and the existing `./data` bind mount; it pulls an image and contains no build instruction.
 
-1. Download `compose.yaml` and `.env.example` from the selected release, or clone this repository and check out its version tag.
+1. Download and extract the selected release's deployment ZIP (it contains `compose.yaml` and `deployment.env.example`), or clone this repository and check out its version tag (`compose.yaml` and `.env.example`). For 1.0.3:
+
+```sh
+curl --fail --location --remote-name https://github.com/dr-rei/npm-technitium-safe-sync/releases/download/v1.0.3/npm-technitium-safe-sync-1.0.3-deployment.zip
+unzip npm-technitium-safe-sync-1.0.3-deployment.zip
+```
+
+If `unzip` is missing on Ubuntu, install it with `sudo apt install unzip`.
+
 2. Back up your Technitium zone. Create an enabled **Primary** zone such as `apps.example.com`. Do not configure overlapping `DNS_ZONES`, zone apex hostnames, or separately hosted subzones.
 3. Create a dedicated NPM account with permission to view **all intended proxy hosts**. A restricted account that sees only some hosts is an incomplete source and could make others look stale. Verify `GET /api/nginx/proxy-hosts` with this account. Recheck access whenever ownership or permissions change. Keep deletion disabled until source visibility is established.
 4. Create a dedicated Technitium user/token with **View + Modify** on the permitted zones only. Grant zone **Delete** only if enabling deletion. No global administrator token is required. Rotate these credentials using the same scoped accounts.
@@ -430,7 +491,7 @@ Requirements: Linux Docker Engine, Docker Compose v2, amd64 or arm64, and connec
 mkdir -p data secrets
 sudo chown 10001:10001 data
 sudo chmod 700 data
-cp .env.example .env
+cp deployment.env.example .env   # or .env.example from a source checkout
 chmod 600 .env
 # Enter credentials through an editor; never commit or paste them into GitHub.
 ${EDITOR:-vi} secrets/npm_secret
@@ -482,18 +543,33 @@ When upgrading from 1.0.0, first disable deletions and back up zone + state. The
 
 ## Version pinning, updates and rollback
 
-Production should set `SYNC_IMAGE=ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<verified-index-digest>` in `.env`. The release evidence includes an actual digest after publication. Version tag `:1.0.3` is readable and is never intentionally re-pushed; a digest pins exact image content. `:main` tracks development and is not a production pin. GHCR has no floating `latest` tag; Docker Hub `latest` follows the GitHub Latest stable release.
+For the step-by-step procedure see [Update to a new version](#update-to-a-new-version);
+this section explains the tags.
 
-The workflow builds `linux/amd64` and `linux/arm64`. Main pushes publish `:main` to GHCR only. Version tags publish `:MAJOR.MINOR.PATCH` to both enabled registries; Docker Hub `latest` follows GitHub Latest. No new commit-hash tags are created. Docker Hub shows only `latest` and numbered releases. Use a digest for immutability. Releases must use new version numbers; never retag an existing release.
+Set `SYNC_IMAGE` in `.env` to a release digest from the GitHub release notes or
+`RELEASE_EVIDENCE.md`. Docker Hub and GHCR hold the same verified index, so
+`docker.io/drreilab/npm-technitium-safe-sync@sha256:<digest>` and
+`ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<digest>` are interchangeable.
+Version tags such as `:1.0.3` are readable and never intentionally re-pushed; a
+digest pins the exact image content. `:main` tracks development and is not a
+production pin. GHCR has no floating `latest`; Docker Hub `latest` follows the
+GitHub Latest stable release and is not recommended for production.
+
+To check what a tag currently points to and which platforms it contains:
 
 ```sh
-# Verify the selected version, copy its digest into .env, then pull it.
-docker buildx imagetools inspect ghcr.io/dr-rei/npm-technitium-safe-sync:1.0.3
-docker compose pull
-docker compose up -d --force-recreate
+docker buildx imagetools inspect docker.io/drreilab/npm-technitium-safe-sync:1.0.3
 ```
 
-Back up zone + state before an update. Roll back by setting the previous verified digest and recreating the container. Rolling back an image does not undo DNS writes; restore DNS/state together only after stopping the service and reviewing the backup. Stop writes quickly with `docker compose stop`.
+Every image supports `linux/amd64` and `linux/arm64`. Main pushes publish `:main`
+to GHCR only. Version tags publish `:MAJOR.MINOR.PATCH` to both registries. No
+commit-hash tags are created. Releases always use new version numbers; an existing
+release is never retagged.
+
+Back up zone + state before an update. Roll back by setting the previous verified
+digest and recreating the container. Rolling back an image does not undo DNS
+writes; restore DNS/state together only after stopping the service and reviewing
+the backup. Stop writes quickly with `docker compose stop`.
 
 ## Docker Hub distribution
 
@@ -512,7 +588,7 @@ On main/tag pushes, the workflow runs unit and local-HTTP integration tests insi
 ## Operations
 
 - Persist `/data/state.json` on a local filesystem with working advisory locks. Protect and back up it and zone data. Do not delete state while running or copy it between different DNS servers.
-- Health reflects a successful **read/reconcile cycle**, including dry-run. A heartbeat older than `max(120, 3 Ã— interval)` seconds is unhealthy. It is not a DNS resolution probe. Docker marks unhealthy containers but does not automatically restart them solely for health failure. Monitor health, cycle errors and conflict counts externally.
+- Health reflects a successful **read/reconcile cycle**, including dry-run. A heartbeat older than `max(120, 3 × interval)` seconds is unhealthy. It is not a DNS resolution probe. Docker marks unhealthy containers but does not automatically restart them solely for health failure. Monitor health, cycle errors and conflict counts externally.
 - Configuration errors exit nonzero. API failures log locally authored safe reasons, or an error class for unexpected exceptions, then retry at the interval. Config, credentials and CA files are loaded at startup; recreate after rotation/change. SIGTERM/SIGINT interrupts the polling wait and stops further writes at cooperative checkpoints; an in-flight request can complete first.
 - The filesystem is read-only except the state mount and temporary directory; UID 10001, all capabilities dropped, no-new-privileges, bounded memory/processes and rotated logs. No ports or Docker socket are exposed.
 - To release, push a new main commit, wait for checks, then push a new `vMAJOR.MINOR.PATCH` tag at that tested commit. The workflow builds and verifies its own published digest. Tag publishing is authorized only for trusted maintainers; protect main and release tags in repository settings according to your policy.

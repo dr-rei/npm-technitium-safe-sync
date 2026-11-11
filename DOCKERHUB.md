@@ -45,7 +45,7 @@ After successful version synchronization:
 docker pull drreilab/npm-technitium-safe-sync:1.0.3
 ```
 
-Use a verified version or registry digest for production, rather than a moving main tag. Set `SYNC_IMAGE=docker.io/drreilab/npm-technitium-safe-sync@sha256:<verified-digest>` in the existing deployment .env; keep endpoints, file secrets and state unchanged. Then run `docker compose pull` and `docker compose up -d --force-recreate` after the normal backup/staging review.
+Use a verified version or registry digest for production, rather than a moving main tag. Set `SYNC_IMAGE=docker.io/drreilab/npm-technitium-safe-sync@sha256:<verified-digest>` in the existing deployment .env; keep endpoints, file secrets and state unchanged. Then run `docker compose pull` and `docker compose up -d --force-recreate` after the normal backup/staging review. The full procedure, including backup, restore and rollback, is in the [README](README.md#update-to-a-new-version).
 
 Public consumers do not need a publishing token or Docker login. Runtime NPM/Technitium credentials are unrelated to registry publishing credentials and remain in local file secrets. This is a project-maintained image, not a Docker Official Image badge.
 
