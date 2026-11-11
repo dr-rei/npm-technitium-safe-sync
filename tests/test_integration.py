@@ -27,6 +27,7 @@ class IntegrationTests(unittest.TestCase):
         self.hosts = [{"enabled": True, "domain_names": ["app.apps.example.com"]}]
         self.writes = []
         self.requests = []
+        self.queried = False
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -68,6 +69,10 @@ class IntegrationTests(unittest.TestCase):
                     fixture.assertEqual(self.headers.get("Authorization"), "Bearer x")
                     fixture.assertNotIn("token", params)
                 if self.path.endswith("/get"):
+                    if fixture.queried:
+                        # Real Technitium 15.6.2 rewrites lastUsedOn whenever a record answers.
+                        for record in fixture.records:
+                            record["lastUsedOn"] = "2026-11-11T08:23:%09.6fZ" % (time.time() % 60)
                     return self.respond({"status": "ok", "response": {
                         "zone": {"name": "apps.example.com", "type": "Primary", "disabled": False},
                         "records": fixture.records}})
@@ -254,6 +259,44 @@ class IntegrationTests(unittest.TestCase):
         self.records = [{"name": "app.apps.example.com", "type": "TXT", "disabled": False, "rData": {}}]
         with self.assertRaises(RuntimeError):
             sync.check_unchanged(self.conf, "app.apps.example.com", expected)
+        self.assertEqual(self.writes, [])
+
+    def test_queried_record_metadata_does_not_block_update_or_delete(self):
+        sync.run_once(self.conf)
+        self.queried = True
+        self.conf["ip"] = "192.0.2.21"
+        self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.assertEqual(self.records[0]["rData"]["ipAddress"], "192.0.2.21")
+        self.conf.update(deletions=True, allow_empty=True)
+        self.hosts = []
+        sync.run_once(self.conf)
+        state = sync.state_load(self.conf["state_path"])
+        state["stale_since"]["app.apps.example.com"] = time.time() - 86401
+        sync.state_save(self.conf["state_path"], state)
+        self.assertEqual(sync.run_once(self.conf)["deleted"], 1)
+        self.assertEqual(self.records, [])
+
+    def test_reread_still_detects_changes_beside_query_metadata(self):
+        sync.run_once(self.conf)
+        expected = copy.deepcopy(self.records)
+        self.records[0]["ttl"] = 999
+        self.records[0]["lastUsedOn"] = "changed"
+        with self.assertRaises(RuntimeError):
+            sync.check_unchanged(self.conf, "app.apps.example.com", expected)
+
+    def test_unmanageable_npm_names_outside_zones_do_not_halt_sync(self):
+        self.hosts = [{"enabled": True, "domain_names": ["app.apps.example.com"]},
+                      {"enabled": False, "domain_names": ["nas"]},
+                      {"enabled": True, "domain_names": ["my_app.lan", "printer"]}]
+        self.assertEqual(sync.run_once(self.conf)["added"], 1)
+        self.writes.clear()
+        for bad in ("bad_name.apps.example.com", "Bad_Name.Apps.Example.Com.", "apps.example.com."):
+            self.hosts = [{"enabled": True, "domain_names": ["app.apps.example.com", bad]}]
+            if bad == "apps.example.com.":
+                self.assertEqual(sync.run_once(self.conf)["added"], 0)  # Valid apex stays excluded.
+                continue
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                sync.run_once(self.conf)
         self.assertEqual(self.writes, [])
 
     def test_redirect_does_not_forward_credentials(self):

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fix updates and deletions of records that clients query: Technitium rewrites `lastUsedOn` on every answer, so the pre-write reread aborted the cycle. The reread now ignores only that field; real 15.6.2 CI queries records between snapshot and reread.
+- Ignore NPM hostnames that cannot be DNS names (for example `nas`, `my_app.lan`) when they lie outside `DNS_ZONES`, instead of halting all synchronization. Invalid names claiming a permitted zone still fail closed.
+- Reread only the target zone before each write instead of every configured zone.
+- Replace the health heartbeat atomically so the healthcheck never reads a partial timestamp.
+
 ## 1.0.2
 
 - Preflight durable state before DNS writes and fsync the directory after atomic replacement.

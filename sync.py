@@ -152,7 +152,7 @@ def npm_hosts(cfg):
     if not isinstance(hosts, list):
         raise SyncError("NPM proxy-host API did not return a list; refusing changes")
     desired = set()
-    enabled = 0
+    enabled = ignored = 0
     for host in hosts:
         if not isinstance(host, dict) or "enabled" not in host or "domain_names" not in host:
             raise SyncError("Malformed NPM host data; refusing changes")
@@ -162,16 +162,26 @@ def npm_hosts(cfg):
         if not isinstance(names, list) or not names:
             raise SyncError("Malformed NPM domain_names; refusing changes")
         for raw in names:
-            if isinstance(raw, str) and raw.startswith("*.") and normalized_name(raw[2:]):
+            if not isinstance(raw, str):
+                raise SyncError("Malformed NPM hostname; refusing changes")
+            if raw.startswith("*.") and normalized_name(raw[2:]):
                 continue
             domain = normalized_name(raw)
             if not domain:
-                raise SyncError("Malformed NPM hostname; refusing changes")
+                # NPM accepts names such as "nas" or "my_app.lan". They can never
+                # be managed here, so only names claiming a permitted zone fail closed.
+                folded = raw.strip().rstrip(".").lower()
+                if any(folded == zone or folded.endswith("." + zone) for zone in cfg["zones"]):
+                    raise SyncError("Malformed NPM hostname in a permitted zone; refusing changes")
+                ignored += 1
+                continue
             if host["enabled"] and any(domain.endswith("." + zone) for zone in cfg["zones"]):
                 desired.add(domain)
         enabled += int(bool(host["enabled"]))
     if not desired and not cfg["allow_empty"]:
         raise SyncError("NPM returned no permitted active hostnames; fail-closed (ALLOW_EMPTY_NPM=false)")
+    if ignored:
+        LOG.warning("Ignored %d NPM hostnames that are not valid DNS names outside DNS_ZONES", ignored)
     LOG.info("Read %d NPM hosts, %d enabled, %d permitted unique names", len(hosts), enabled, len(desired))
     return desired
 
@@ -195,9 +205,9 @@ def tech_call(cfg, path, params=None, write=False):
     return result
 
 
-def dns_records(cfg):
+def dns_records(cfg, zones=None):
     records = {}
-    for zone in cfg["zones"]:
+    for zone in (cfg["zones"] if zones is None else zones):
         check_stop(cfg)
         obj = tech_call(cfg, "/api/zones/records/get", {"zone": zone, "domain": zone, "listZone": "true"})
         content = obj.get("response", {})
@@ -287,14 +297,23 @@ def has_blocking_ancestor(domain, zone, snapshot):
     return False
 
 
+# Technitium rewrites lastUsedOn whenever a record answers a query; it is not a change.
+VOLATILE_RECORD_FIELDS = frozenset({"lastUsedOn"})
+
+
+def stable_records(records):
+    return [{k: v for k, v in r.items() if k not in VOLATILE_RECORD_FIELDS} for r in records]
+
+
 def check_unchanged(cfg, domain, expected):
     """Reduce the read/write race; the upstream API has no conditional-write contract."""
-    fresh = dns_records(cfg)
-    if fresh.get(domain, []) != expected:
-        raise SyncError("DNS changed during reconciliation; refusing this write")
     zone = zone_for(domain, cfg["zones"])
     if zone is None:
         raise SyncError("DNS name outside permitted zones")
+    # Ancestors checked below never leave the longest matching (target) zone.
+    fresh = dns_records(cfg, (zone,))
+    if stable_records(fresh.get(domain, [])) != stable_records(expected):
+        raise SyncError("DNS changed during reconciliation; refusing this write")
     if has_blocking_ancestor(domain, zone, fresh):
         raise SyncError("DNS delegation or alias blocks this write")
     check_stop(cfg)
@@ -407,7 +426,10 @@ def run_once(cfg):
     state = state_load(cfg["state_path"])
     result = reconcile(cfg, desired, snapshot, state)
     LOG.info("Cycle completed: %s", json.dumps(result, sort_keys=True))
-    (cfg["state_path"].parent / "last_success").write_text(str(int(time.time())))
+    marker = cfg["state_path"].parent / "last_success"
+    tmp = marker.with_name(marker.name + ".tmp")
+    tmp.write_text(str(int(time.time())))
+    os.replace(tmp, marker)  # The healthcheck never observes a partial timestamp.
     return result
 
 

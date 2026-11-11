@@ -51,17 +51,24 @@ class OperationTests(unittest.TestCase):
                 snapshot[params["domain"]] = [managed(config["ip"])]
                 return {"status": "ok"}
             with patch.object(sync, "npm_hosts", return_value=desired), \
-                    patch.object(sync, "dns_records", side_effect=lambda _: copy.deepcopy(snapshot)), \
+                    patch.object(sync, "dns_records", side_effect=lambda *_: copy.deepcopy(snapshot)), \
                     patch.object(sync, "tech_call", side_effect=write):
                 with self.assertRaises(RuntimeError):
                     sync.run_once(conf)
             self.assertEqual(sync.state_load(conf["state_path"])["owned"],
                              {"a.apps.example.com": conf["ip"]})
             with patch.object(sync, "npm_hosts", return_value=desired), \
-                    patch.object(sync, "dns_records", side_effect=lambda _: copy.deepcopy(snapshot)), \
+                    patch.object(sync, "dns_records", side_effect=lambda *_: copy.deepcopy(snapshot)), \
                     patch.object(sync, "tech_call", return_value={"status": "ok"}) as api:
                 self.assertEqual(sync.run_once(conf)["added"], 1)
                 self.assertEqual(api.call_args.args[2]["domain"], "b.apps.example.com")
+
+    def test_pre_write_reread_reads_only_the_target_zone(self):
+        conf = cfg(Path("/nonexistent/state.json"))
+        conf["zones"] = ("apps.example.com", "lab.example.net")
+        with patch.object(sync, "dns_records", return_value={}) as read_dns:
+            sync.check_unchanged(conf, "app.lab.example.net", [])
+        read_dns.assert_called_once_with(conf, ("lab.example.net",))
 
     def test_orphan_with_matching_marker_is_never_automatically_adopted(self):
         with tempfile.TemporaryDirectory() as d:

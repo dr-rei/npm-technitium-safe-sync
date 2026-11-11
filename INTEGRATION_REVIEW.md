@@ -74,7 +74,7 @@ uses isolated HTTP and does not verify your TLS chain, firewall or reverse proxy
 - Cancellation is cooperative. An in-flight request may complete first; a
   successful write is committed before stopping. The 12-second socket timeout
   limits inactivity, not total cycle duration. Force kill can interrupt a write.
-- Responses above 4 MB fail closed. Every mutation rereads all configured zones
+- Responses above 4 MB fail closed. Every mutation rereads its target zone
   and commits full state. Large batches can be expensive; no large-fleet
   throughput or HA claim is made.
 - Health means a completed cycle, including dry-run and conflicts. It is not proof

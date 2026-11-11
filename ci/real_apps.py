@@ -127,7 +127,16 @@ def exercise(mode, npm_admin, dns_admin):
         check("npm-technitium-integration-ok" in r.read().decode(), mode + ": DNS -> NPM -> HTTP backend forwarding")
     conf["ip"] = "192.0.2.21"
     conf["ttl"] = 300
-    check(sync.run_once(conf)["updated"] == 2, mode + ": update previous IP and TTL")
+    # Client queries between the snapshot and the pre-write reread change lastUsedOn.
+    load_state = sync.state_load
+    def load_after_client_queries(path):
+        dns_answers(app), dns_answers(alias)
+        return load_state(path)
+    sync.state_load = load_after_client_queries
+    try:
+        check(sync.run_once(conf)["updated"] == 2, mode + ": update previous IP and TTL while records are queried")
+    finally:
+        sync.state_load = load_state
     snapshot = sync.dns_records(conf)
     check(sync.a_values(snapshot[app]) == ["192.0.2.21"] and snapshot[app][0]["ttl"] == 300,
           mode + ": actual update parameters and returned record metadata")
