@@ -1,0 +1,34 @@
+services:
+  npm-technitium-safe-sync:
+    image: ${SYNC_IMAGE:?Set SYNC_IMAGE to a verified GHCR version or digest in .env}
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      NPM_SECRET_FILE: /run/secrets/npm_secret
+      TECHNITIUM_TOKEN_FILE: /run/secrets/technitium_token
+    secrets:
+      - npm_secret
+      - technitium_token
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    user: "10001:10001"
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 32
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+secrets:
+  npm_secret:
+    file: ./secrets/npm_secret
+  technitium_token:
+    file: ./secrets/technitium_token

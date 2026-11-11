@@ -1,0 +1,98 @@
+name: Verify and publish
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: 3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and run tests without external network
+        run: |
+          docker build -t sync:test .
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 256m -v "$PWD/tests:/tests:ro" --entrypoint python sync:test -m unittest discover -s /tests -v
+          sh tests/container-smoke.sh sync:test
+      - name: Validate deployment configuration and image pin
+        run: |
+          cp .env.example .env
+          mkdir -p secrets data
+          printf dummy > secrets/npm_secret
+          printf dummy > secrets/technitium_token
+          docker compose config --quiet
+          if docker compose config | grep -q 'build:'; then exit 1; fi
+          if SYNC_IMAGE= docker compose config --quiet 2>/dev/null; then exit 1; fi
+  publish:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: 3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select image tags
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          image="ghcr.io/${REPOSITORY,,}"
+          if [ "$REF_TYPE" = tag ]; then
+            [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Release tags must be vMAJOR.MINOR.PATCH'; exit 1; }
+            tag="${REF_NAME#v}"
+          else
+            tag=main
+          fi
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+          echo "tags=$image:$tag,$image:sha-$COMMIT" >> "$GITHUB_OUTPUT"
+      - uses: 99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: 8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=NPM Technitium Safe Sync
+          provenance: mode=max
+          sbom: true
+      - name: Verify published digest and configuration
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "$IMAGE@$DIGEST"
+          docker pull "$IMAGE@$DIGEST"
+          sh tests/container-smoke.sh "$IMAGE@$DIGEST"
+          cp .env.example .env
+          mkdir -p secrets data
+          printf dummy > secrets/npm_secret
+          printf dummy > secrets/technitium_token
+          SYNC_IMAGE="$IMAGE@$DIGEST" docker compose config --quiet
+          SYNC_IMAGE="$IMAGE@$DIGEST" docker compose pull
+          printf 'Verified image: `%s@%s`\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
