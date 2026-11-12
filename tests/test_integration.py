@@ -553,6 +553,42 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(sync.run_once(self.conf)["updated"], 1)
         self.assertEqual(set(self.by_type("app.apps.example.com")), {"A", "HTTPS"})
 
+    def test_https_companion_can_be_disabled_and_reenabled(self):
+        self.zone_type = "Forwarder"
+        self.records = copy.deepcopy(self.FORWARDER_APEX)
+        self.conf["https_records"] = False
+        self.assertEqual(sync.run_once(self.conf)["added"], 1)
+        self.assertEqual([w[1]["type"] for w in self.writes], ["A"])
+        self.conf["https_records"] = True
+        self.writes.clear()
+        self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.assertEqual([w[1]["type"] for w in self.writes], ["HTTPS"])
+        # Disabling removes the tool's own companion, and only that.
+        self.conf["https_records"] = False
+        self.writes.clear()
+        self.conf["dry_run"] = True
+        with self.assertLogs(sync.LOG, "INFO") as logs:
+            self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.assertEqual(self.writes, [])
+        self.assertTrue(any("PLAN DELETE app.apps.example.com HTTPS" in line for line in logs.output))
+        self.conf["dry_run"] = False
+        self.assertEqual(sync.run_once(self.conf)["updated"], 1)
+        self.assertEqual([(w[0].rsplit("/", 1)[1], w[1]["type"], w[1]["svcParams"]) for w in self.writes],
+                         [("delete", "HTTPS", "alpn|h2,http/1.1")])
+        self.assertEqual(set(self.by_type("app.apps.example.com")), {"A"})
+        self.writes.clear()
+        self.assertEqual(sync.run_once(self.conf)["updated"], 0)
+        self.assertEqual(self.writes, [])
+
+    def test_disabling_https_never_removes_a_manual_https_record(self):
+        self.zone_type = "Forwarder"
+        sync.run_once(self.conf)
+        self.by_type("app.apps.example.com")["HTTPS"]["comments"] = "manual"
+        self.conf["https_records"] = False
+        self.writes.clear()
+        self.assertEqual(sync.run_once(self.conf)["conflicts"], 1)
+        self.assertEqual(self.writes, [])
+
     def test_normal_apex_soa_and_ns_allow_child_add(self):
         self.records = [{"name": "apps.example.com", "type": "SOA", "disabled": False, "rData": {}},
                         {"name": "apps.example.com", "type": "NS", "disabled": False, "rData": {}}]

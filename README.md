@@ -84,7 +84,8 @@ Forwarder zone works as it is.
 > every name it manages in a Forwarder zone, a local `HTTPS` record advertising only
 > `h2,http/1.1` with the same managed comment. It replaces the forwarded one and is
 > updated and deleted together with the A record. Primary zones never forward, so
-> they get none. After upgrading, flush Technitium's cache (**Cache → Flush**) and
+> they get none. Set `FORWARDER_HTTPS_RECORDS=false` to turn this off (the tool
+> then removes the HTTPS records it created). After upgrading, flush Technitium's cache (**Cache → Flush**) and
 > restart the browser, or wait for cached answers to expire.
 
 > **IPv6 in Forwarder zones:** the tool creates only `A` (IPv4) records. Queries
@@ -215,6 +216,9 @@ ENABLE_DELETIONS=false
 DELETE_GRACE_SECONDS=86400
 MAX_DELETES_PER_RUN=5
 ALLOW_EMPTY_NPM=false
+# Forwarder zones only: also create a local HTTPS record per name that disables
+# HTTP/3 (prevents ERR_QUIC_PROTOCOL_ERROR). false removes the tool's HTTPS records.
+FORWARDER_HTTPS_RECORDS=true
 # Change to true only for HTTP management endpoints on a trusted isolated network.
 ALLOW_INSECURE_HTTP=false
 ```
@@ -247,6 +251,7 @@ ALLOW_INSECURE_HTTP=false
 | `ENABLE_DELETIONS` | `false` | `true` = remove records this tool created after their NPM host is gone. Keep `false` at first |
 | `DELETE_GRACE_SECONDS` | `86400` | How long a host must stay absent before its record is deleted (minimum 300) |
 | `MAX_DELETES_PER_RUN` | `5` | If more names than this are waiting, **no** deletions happen that cycle |
+| `FORWARDER_HTTPS_RECORDS` | `true` | Forwarder zones only: also create a local `HTTPS` record per managed name that disables HTTP/3, preventing `ERR_QUIC_PROTOCOL_ERROR` (see [Which zone type?](#2-prepare-technitium)). `false` creates none and removes the ones this tool created. No effect on Primary zones |
 | `ALLOW_EMPTY_NPM` | `false` | `true` only if NPM may legitimately have no matching hosts; otherwise an empty list is treated as an error |
 | `ALLOW_INSECURE_HTTP` | `false` | Must be `true` when either URL starts with `http://`. Use only on a trusted LAN |
 
@@ -400,6 +405,7 @@ docker compose up -d --force-recreate
 | Preview changes again | Set `DRY_RUN=true` and recreate. Nothing is written until you set it back to `false` |
 | Pause syncing | `docker compose stop`; resume with `docker compose start`. DNS records stay as they are |
 | See what the tool manages | In Technitium, records it created (A records, plus `HTTPS` records in Forwarder zones) carry the comment `managed-by:npm-technitium-safe-sync/v1`. Do not add that comment to your own records: the tool still will not treat them as its own |
+| Turn the HTTP/3 fix on or off | Set `FORWARDER_HTTPS_RECORDS=true` or `false` and recreate. `false` removes the tool's HTTPS records within one cycle; `true` adds them back. Flush Technitium's cache afterwards |
 | Recreate records deleted by mistake | Stop the service and run `--forget-missing`; see [Repair ownership](#repair-ownership-after-manual-dns-changes) |
 | Update the tool | See [Update to a new version](#update-to-a-new-version) |
 

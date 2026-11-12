@@ -73,6 +73,15 @@ class RegressionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sync.validate_config()
 
+    def test_forwarder_https_records_setting(self):
+        for value, expected in ((None, True), ("true", True), ("false", False), ("0", False)):
+            env = self._base_environment() if value is None else self._base_environment(FORWARDER_HTTPS_RECORDS=value)
+            with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
+                self.assertIs(sync.validate_config()["https_records"], expected)
+        with patch.dict(os.environ, self._base_environment(FORWARDER_HTTPS_RECORDS="maybe"), clear=True):
+            with self.assertRaises(ValueError):
+                sync.validate_config()
+
     def test_config_rejects_overflowing_interval_and_dns_ttl(self):
         for key, value in (("SYNC_INTERVAL_SECONDS", "100000000000000000000"),
                            ("DNS_TTL_SECONDS", "4294967296"),

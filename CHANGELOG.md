@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.7
+
+- Add `FORWARDER_HTTPS_RECORDS` (default `true`) to turn the Forwarder-zone HTTPS companion records on or off. `false` creates none and removes the companions this tool created (after a fresh reread proves they are unchanged); re-enabling adds them back. Manual HTTPS records are never touched.
+
 ## 1.0.6
 
 - An explicit Technitium rejection of one write (status `error`, nothing applied) no longer stops the other names. A name inside a separate, unlisted zone is a conflict with a specific reason; any other rejection (for example missing permission) is skipped too, but the cycle then reports failed so the healthcheck shows it. Transport, TLS and token failures still abort immediately. Remote error text is classified, never logged.

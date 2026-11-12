@@ -89,6 +89,7 @@ def validate_config():
         "delete_grace": int(os.environ.get("DELETE_GRACE_SECONDS", "86400")),
         "max_deletes": int(os.environ.get("MAX_DELETES_PER_RUN", "5")),
         "allow_empty": flag("ALLOW_EMPTY_NPM", False),
+        "https_records": flag("FORWARDER_HTTPS_RECORDS", True),
         "state_path": Path(os.environ.get("STATE_FILE", "/data/state.json")),
     }
     for url in (cfg["npm_url"], cfg["dns_url"]):
@@ -421,6 +422,28 @@ def reconcile(cfg, desired, snapshot, state, now=None, zone_types=None, shadowed
                             "permissions and the record); nothing was written", domain)
             return False
 
+    def want_https(zone):
+        # FORWARDER_HTTPS_RECORDS=false turns the companion off (and removes existing ones).
+        return cfg.get("https_records", True) and zone_types.get(zone) == "Forwarder"
+
+    def remove_https(domain, zone, ip):
+        """Delete this tool's companion HTTPS record after a fresh reread proves the
+        name still holds exactly this tool's A and HTTPS records."""
+        LOG.info("%s DELETE %s HTTPS alpn=%s (FORWARDER_HTTPS_RECORDS=false)",
+                 "PLAN" if cfg["dry_run"] else "APPLY", domain, HTTPS_ALPN)
+        if cfg["dry_run"]:
+            return True
+        fresh = dns_records(cfg, (zone,))
+        parts = owned_parts(fresh.get(domain, []), ip)
+        if parts is None or parts[1] is None or has_blocking_ancestor(domain, zone, fresh):
+            changes["conflicts"] += 1
+            LOG.warning("SKIP HTTPS companion removal for %s: DNS changed during reconciliation", domain)
+            return False
+        check_stop(cfg)
+        return write(domain, "/api/zones/records/delete", {
+            "domain": domain, "zone": zone, "type": "HTTPS", "svcPriority": "1",
+            "svcTargetName": ".", "svcParams": "alpn|" + HTTPS_ALPN})
+
     def ensure_https(domain, zone, ip):
         """Add the companion HTTPS record after a fresh reread proves the name holds
         exactly this tool's A record. Returns True when it was (or would be) added."""
@@ -493,7 +516,7 @@ def reconcile(cfg, desired, snapshot, state, now=None, zone_types=None, shadowed
                 state["owned"][domain] = cfg["ip"]
                 commit()
             changes["added"] += 1
-            if zone_types.get(zone) == "Forwarder":
+            if want_https(zone):
                 ensure_https(domain, zone, cfg["ip"])  # Part of this add; not counted again.
             continue
         parts = owned_parts(existing, owned_ip)
@@ -515,9 +538,12 @@ def reconcile(cfg, desired, snapshot, state, now=None, zone_types=None, shadowed
                 commit()
             changes["updated"] += 1
             a_updated = True
-        if parts[1] is None and zone_types.get(zone) == "Forwarder":
+        if parts[1] is None and want_https(zone):
             # Records created before 1.0.6, or whose companion add was interrupted.
             if ensure_https(domain, zone, state["owned"][domain]) and not a_updated:
+                changes["updated"] += 1
+        elif parts[1] is not None and not cfg.get("https_records", True):
+            if remove_https(domain, zone, state["owned"][domain]) and not a_updated:
                 changes["updated"] += 1
     if cfg["deletions"]:
         absent = set(state["owned"]) - desired

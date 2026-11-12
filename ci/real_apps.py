@@ -267,6 +267,12 @@ def exercise_forwarder(npm_admin, dns_admin):
           and inner in sync.state_load(conf["state_path"])["owned"], "admin: --forget-missing releases only missing names")
     check(sync.run_once(conf)["added"] == 1 and {r["type"] for r in sync.dns_records(conf)[app]} == {"A", "HTTPS"},
           "admin: released name is recreated with its HTTPS companion")
+    conf["https_records"] = False
+    check(sync.run_once(conf)["updated"] == 1 and {r["type"] for r in sync.dns_records(conf)[app]} == {"A"},
+          "toggle: FORWARDER_HTTPS_RECORDS=false removes the HTTPS companion")
+    conf["https_records"] = True
+    check(sync.run_once(conf)["updated"] == 1 and {r["type"] for r in sync.dns_records(conf)[app]} == {"A", "HTTPS"},
+          "toggle: re-enabling recreates the HTTPS companion")
     request(NPM, "/api/nginx/proxy-hosts/" + str(proxy["id"]) + "/disable", {}, npm_admin)
     check(sync.run_once(conf)["pending"] == 2, "forwarder: removed hosts start grace")
     state = sync.state_load(conf["state_path"])
