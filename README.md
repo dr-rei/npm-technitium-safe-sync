@@ -25,7 +25,7 @@ Tests include local HTTP fixtures and disposable real NPM **2.16.0** / Technitiu
 ## Production quickstart: two files, then up
 
 For a **fresh installation** you need only two files, `compose.yaml` and `.env`.
-The preset pulls the verified public **1.0.6** image by digest, creates its own
+The preset pulls the verified public **1.0.7** image by digest, creates its own
 persistent storage with the correct nonroot ownership, and starts polling. No
 source checkout, build, secret files, host data directory or `chown` is needed.
 Already running an older version? Skip to [State, updates and backups](#state-updates-and-backups).
@@ -142,7 +142,7 @@ nano .env
 
 Alternatively, create the files manually using the exact contents below.
 [Compose preset](compose.quickstart.yaml) · [Environment template](.env.quickstart.example)
-Or extract the [two-file 1.0.6 quickstart ZIP](https://github.com/dr-rei/npm-technitium-safe-sync/releases/download/v1.0.6/npm-technitium-safe-sync-1.0.6-quickstart.zip)
+Or extract the [two-file 1.0.7 quickstart ZIP](https://github.com/dr-rei/npm-technitium-safe-sync/releases/download/v1.0.7/npm-technitium-safe-sync-1.0.7-quickstart.zip)
 into a new directory; it contains only `compose.yaml` and `.env`. Edit `.env`
 before starting.
 
@@ -194,8 +194,8 @@ volumes:
 
 ```dotenv
 # Fresh installs only. Save as .env next to compose.quickstart.yaml saved as compose.yaml.
-# Verified public 1.0.6 image; no registry login or local build is needed.
-SYNC_IMAGE=docker.io/drreilab/npm-technitium-safe-sync@sha256:71b1860f3e049aba51e79d78a94d774ff76b8ffeccc107fb944417c6b07019bf
+# Verified public 1.0.7 image; no registry login or local build is needed.
+SYNC_IMAGE=docker.io/drreilab/npm-technitium-safe-sync@sha256:133ae05cf8031b07710e4f4c8f202acb109919c381ee0bfd354807164544ac33
 NPM_URL=https://npm.internal.example.com
 NPM_IDENTITY=dns-sync@example.com
 # Use single quotes so dollar signs, hashes and spaces remain literal.
@@ -243,7 +243,7 @@ ALLOW_INSECURE_HTTP=false
 
 | Setting | Template value | Meaning |
 | --- | --- | --- |
-| `SYNC_IMAGE` | verified 1.0.6 digest | Image to run. Change it only when upgrading |
+| `SYNC_IMAGE` | verified 1.0.7 digest | Image to run. Change it only when upgrading |
 | `TECHNITIUM_AUTH_MODE` | `bearer` | `bearer` for Technitium 15+; `parameter` for older servers (token sent in the POST body) |
 | `DNS_TTL_SECONDS` | `120` | TTL of created records, 30 or more |
 | `SYNC_INTERVAL_SECONDS` | `300` | Seconds between polls, 30 or more |
@@ -515,7 +515,7 @@ docker compose logs --tail=50 npm-technitium-safe-sync
    owned.
 
 Only `SYNC_IMAGE` changes; `.env` settings and the state volume carry over. A
-version tag such as `docker.io/drreilab/npm-technitium-safe-sync:1.0.6` also
+version tag such as `docker.io/drreilab/npm-technitium-safe-sync:1.0.7` also
 works and is easier to read; the digest guarantees the exact verified image.
 Avoid `latest` in production, because it changes without you choosing to update.
 
@@ -564,11 +564,11 @@ files to merge.
 
 Requirements: Linux Docker Engine, Docker Compose v2, amd64 or arm64, and connectivity from the container to the management endpoints. Existing NPM and Technitium containers do not need restarting. The original `compose.yaml` uses file secrets and the existing `./data` bind mount; it pulls an image and contains no build instruction.
 
-1. Download and extract the selected release's deployment ZIP (it contains `compose.yaml` and `deployment.env.example`), or clone this repository and check out its version tag (`compose.yaml` and `.env.example`). For 1.0.6:
+1. Download and extract the selected release's deployment ZIP (it contains `compose.yaml` and `deployment.env.example`), or clone this repository and check out its version tag (`compose.yaml` and `.env.example`). For 1.0.7:
 
 ```sh
-curl --fail --location --remote-name https://github.com/dr-rei/npm-technitium-safe-sync/releases/download/v1.0.6/npm-technitium-safe-sync-1.0.6-deployment.zip
-unzip npm-technitium-safe-sync-1.0.6-deployment.zip
+curl --fail --location --remote-name https://github.com/dr-rei/npm-technitium-safe-sync/releases/download/v1.0.7/npm-technitium-safe-sync-1.0.7-deployment.zip
+unzip npm-technitium-safe-sync-1.0.7-deployment.zip
 ```
 
 If `unzip` is missing on Ubuntu, install it with `sudo apt install unzip`.
@@ -617,6 +617,10 @@ NPM uses `POST /api/tokens` then `GET /api/nginx/proxy-hosts` with a bearer toke
 `TECHNITIUM_AUTH_MODE=bearer` targets Technitium **15+**, whose API documents bearer authentication. For older Technitium versions use `parameter`; the token is sent in a POST form body, never a query URL. All Technitium calls use POST forms. Both modes are tested against actual Technitium 15.6.2; older releases and your installed configuration still need staging validation.
 
 Use trusted HTTPS certificates, final URLs without redirects, and firewalls limiting management-port access. HTTP requires `ALLOW_INSECURE_HTTP=true` and sends credentials in plaintext. For a private CA, mount a CA bundle read-only and set `SSL_CERT_FILE` to its container path; do not disable TLS verification. Ambient HTTP proxy variables are intentionally ignored. When using host management endpoints from Docker, `localhost` refers to this new container; use reachable host/IP addresses or appropriate Docker networks.
+
+## Switchable HTTPS records in 1.0.7
+
+Version 1.0.7 adds `FORWARDER_HTTPS_RECORDS` (default `true`) to turn the Forwarder-zone `HTTPS` records on or off. `false` creates none and removes the ones this tool created; manual records are never touched. Everything else is unchanged from 1.0.6; upgrade by replacing `SYNC_IMAGE` as described in [Update to a new version](#update-to-a-new-version).
 
 ## Nested zones, HTTP/3 and per-name failures in 1.0.6
 
@@ -680,7 +684,7 @@ Set `SYNC_IMAGE` in `.env` to a release digest from the GitHub release notes or
 `RELEASE_EVIDENCE.md`. Docker Hub and GHCR hold the same verified index, so
 `docker.io/drreilab/npm-technitium-safe-sync@sha256:<digest>` and
 `ghcr.io/dr-rei/npm-technitium-safe-sync@sha256:<digest>` are interchangeable.
-Version tags such as `:1.0.6` are readable and never intentionally re-pushed; a
+Version tags such as `:1.0.7` are readable and never intentionally re-pushed; a
 digest pins the exact image content. `:main` tracks development and is not a
 production pin. GHCR has no floating `latest`; Docker Hub `latest` follows the
 GitHub Latest stable release and is not recommended for production.
@@ -688,7 +692,7 @@ GitHub Latest stable release and is not recommended for production.
 To check what a tag currently points to and which platforms it contains:
 
 ```sh
-docker buildx imagetools inspect docker.io/drreilab/npm-technitium-safe-sync:1.0.6
+docker buildx imagetools inspect docker.io/drreilab/npm-technitium-safe-sync:1.0.7
 ```
 
 Every image supports `linux/amd64` and `linux/arm64`. Main pushes publish `:main`

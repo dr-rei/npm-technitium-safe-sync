@@ -19,7 +19,7 @@ When Docker Hub publishing is disabled, neither its login nor its tags/verificat
 
 ## Tags and deployment
 
-Docker Hub contains only `latest` and numbered release tags such as `1.0.6`, `1.0.5`, `1.0.4`, `1.0.3`, `1.0.2`, `1.0.1` and `1.0.0`. A newly pushed `vMAJOR.MINOR.PATCH` tag publishes `:MAJOR.MINOR.PATCH` to both enabled registries. Main builds publish only `ghcr.io/dr-rei/npm-technitium-safe-sync:main`. No new `sha-<commit>` tags are created. The release-sync workflow also copies existing published releases from GHCR without rebuilding them, preserving the complete multiarchitecture digest. Do not move existing Git tags or rebuild released content merely to add another registry.
+Docker Hub contains only `latest` and numbered release tags such as `1.0.7`, `1.0.6`, `1.0.5`, `1.0.4`, `1.0.3`, `1.0.2`, `1.0.1` and `1.0.0`. A newly pushed `vMAJOR.MINOR.PATCH` tag publishes `:MAJOR.MINOR.PATCH` to both enabled registries. Main builds publish only `ghcr.io/dr-rei/npm-technitium-safe-sync:main`. No new `sha-<commit>` tags are created. The release-sync workflow also copies existing published releases from GHCR without rebuilding them, preserving the complete multiarchitecture digest. Do not move existing Git tags or rebuild released content merely to add another registry.
 
 ## GitHub release version matching
 
@@ -34,18 +34,19 @@ Docker Hub contains only `latest` and numbered release tags such as `1.0.6`, `1.
 | v1.0.4 | drreilab/npm-technitium-safe-sync:1.0.4 |
 | v1.0.5 | drreilab/npm-technitium-safe-sync:1.0.5 |
 | v1.0.6 | drreilab/npm-technitium-safe-sync:1.0.6 |
+| v1.0.7 | drreilab/npm-technitium-safe-sync:1.0.7 |
 | GitHub Latest stable release | drreilab/npm-technitium-safe-sync:latest |
 
 A version sync requires a published GitHub release, an existing GHCR version image whose source/revision labels match that release, and the public destination repository. It waits up to roughly five minutes for a tag build, then fails for manual retry if the image is still unavailable. It copies all platforms/attestations using Skopeo with digest preservation. A different existing Docker Hub version fails closed instead of being replaced. Existing version matches are idempotent. `latest` is updated only when the requested tag equals GitHub's current Latest designation, so a historical backfill cannot move it backwards. Sync jobs are serialized.
 
-The default `docker pull drreilab/npm-technitium-safe-sync` resolves to `latest`. Prefer a version or exact digest in production. Version 1.0.0 is historical and contains the operational defects repaired in 1.0.1; prefer 1.0.6 or newer.
+The default `docker pull drreilab/npm-technitium-safe-sync` resolves to `latest`. Prefer a version or exact digest in production. Version 1.0.0 is historical and contains the operational defects repaired in 1.0.1; prefer 1.0.7 or newer.
 
 For a new release: push a new vMAJOR.MINOR.PATCH tag, wait for Verify and publish to finish, then publish the matching GitHub release. The sync workflow aligns latest. If another workflow creates a release with GITHUB_TOKEN and GitHub suppresses its follow-on event, explicitly dispatch the version-sync workflow. After changing GitHub's Latest designation, check the sync run or manually dispatch the newly selected latest tag. Verify actual workflow success and registry digests before advertising a tag.
 
 After successful version synchronization:
 
 ```sh
-docker pull drreilab/npm-technitium-safe-sync:1.0.6
+docker pull drreilab/npm-technitium-safe-sync:1.0.7
 ```
 
 Use a verified version or registry digest for production, rather than a moving main tag. Set `SYNC_IMAGE=docker.io/drreilab/npm-technitium-safe-sync@sha256:<verified-digest>` in the existing deployment .env; keep endpoints, file secrets and state unchanged. Then run `docker compose pull` and `docker compose up -d --force-recreate` after the normal backup/staging review. The full procedure, including backup, restore and rollback, is in the [README](README.md#update-to-a-new-version).
